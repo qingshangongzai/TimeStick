@@ -1,5 +1,5 @@
 //! 系统托盘：优先加载 exe 内嵌图标（与文件图标同一设计源，见 src/icon.rs），
-//! 失败时回退到 GDI 绘制的表盘；右键弹出菜单【直接退出】。
+//! 失败时回退到 GDI 绘制的表盘；右键弹出菜单【显示悬浮窗】【直接退出】。
 
 use std::mem::size_of;
 use std::ptr::null_mut;
@@ -24,7 +24,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::icon;
 use crate::log::Log;
 
-pub const TRAY_CMD_EXIT: usize = 1001;
+pub const TRAY_CMD_SHOW: usize = 1000; // 显示悬浮窗
+pub const TRAY_CMD_EXIT: usize = 1001; // 直接退出
 const TRAY_ID: u32 = 1;
 
 pub struct Tray {
@@ -80,6 +81,7 @@ impl Tray {
             // 菜单正常关闭需要窗口处于前台
             let _ = SetForegroundWindow(self.hwnd);
             let Ok(menu) = CreatePopupMenu() else { return };
+            let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_SHOW, w!("显示悬浮窗"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_EXIT, w!("直接退出"));
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);

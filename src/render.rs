@@ -1,8 +1,8 @@
 //! D2D/DWrite 渲染管线：将时间文字与按钮绘制到 32bpp ARGB 位图（每像素 Alpha），
 //! 再经 UpdateLayeredWindow 整体提交 —— 实现“半透明圆角背景 + 不透明文字”。
 //!
-//! 布局为单行：[时间] [图钉] [关闭]。渲染目标固定 DPI=96，
-//! 布局坐标即物理像素（与鼠标热区一致）。
+//! 布局为单行：[时间] [图钉] [关闭]；鼠标未悬停时只画时间（水平居中），
+//! 悬停时展开背景与按钮。渲染目标固定 DPI=96，布局坐标即物理像素（与鼠标热区一致）。
 
 use std::mem::size_of;
 use std::ptr::null_mut;
@@ -66,6 +66,8 @@ pub struct Renderer {
     pub size: (i32, i32),
     /// 单行文本高度（垂直居中用）
     text_h: f32,
+    /// 单行文本宽度（未悬停水平居中用）
+    text_w: f32,
     /// 图钉按钮热区（客户区坐标）
     pub btn_pin: RECT,
     /// 关闭按钮热区（客户区坐标）
@@ -167,15 +169,17 @@ impl Renderer {
             dump_path: std::env::var("TIMESTICK_DUMP").ok().filter(|p| !p.is_empty()),
             size: (w, h),
             text_h,
+            text_w,
             btn_pin,
             btn_close,
         })
     }
 
     /// 绘制当前帧。
-    /// - 半透明圆角背景（深色背景黑底/浅色背景白底，固定模式悬停时背景加深作为提示）
-    /// - 时间文字（深色背景白字/浅色背景黑字）
-    /// - 非固定：空心图钉 + 关闭 X；固定且悬停：实心图钉（“即将解除”反馈）
+    /// - 未悬停（hovering=false）：只画时间文字（水平居中），无背景无按钮 —— 纯文字悬浮
+    /// - 悬停（hovering=true）：半透明圆角背景 + 时间（回到左侧）+ 按钮
+    /// - 背景配色随背景亮度反色（深色背景黑底/浅色背景白底），固定模式悬停时加深作为提示
+    /// - 时间文字：深色背景白字/浅色背景黑字；按钮：非固定显示空心图钉 + 关闭 X，固定显示实心图钉（“即将解除”反馈）
     pub fn render(&self, time: &str, pinned: bool, hovering: bool, dark_bg: bool) {
         unsafe {
             let (w, h) = self.size;
@@ -188,24 +192,27 @@ impl Renderer {
             // 全透明清底
             self.rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
             // 圆角背景（每像素 Alpha：圆角外区域保持透明）。
-            // dark_bg=false（浅色背景）时反色为半透明白底
-            let bg = match (dark_bg, pinned && hovering) {
-                (true, true) => &self.brush_bg_hover,
-                (true, false) => &self.brush_bg,
-                (false, true) => &self.brush_bg_light_hover,
-                (false, false) => &self.brush_bg_light,
-            };
-            let rounded = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F { left: 0.0, top: 0.0, right: w as f32, bottom: h as f32 },
-                radiusX: CORNER_RADIUS,
-                radiusY: CORNER_RADIUS,
-            };
-            self.rt.FillRoundedRectangle(&rounded, bg);
-            // 时间文字（垂直居中，浅色背景用黑色、深色背景用白色）
+            // dark_bg=false（浅色背景）时反色为半透明白底；固定模式悬停时加深作为提示
+            if hovering {
+                let bg = match (dark_bg, pinned) {
+                    (true, true) => &self.brush_bg_hover,
+                    (true, false) => &self.brush_bg,
+                    (false, true) => &self.brush_bg_light_hover,
+                    (false, false) => &self.brush_bg_light,
+                };
+                let rounded = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F { left: 0.0, top: 0.0, right: w as f32, bottom: h as f32 },
+                    radiusX: CORNER_RADIUS,
+                    radiusY: CORNER_RADIUS,
+                };
+                self.rt.FillRoundedRectangle(&rounded, bg);
+            }
+            // 时间文字（垂直居中；未悬停水平居中，悬停回到左侧给按钮让位）
             let text_brush = if dark_bg { &self.brush_light } else { &self.brush_dark };
             let tc: Vec<u16> = time.encode_utf16().collect();
             let text_y = ((h as f32 - self.text_h) / 2.0).max(0.0);
-            let layout = D2D_RECT_F { left: PAD_X, top: text_y, right: 100000.0, bottom: 100000.0 };
+            let text_x = if hovering { PAD_X } else { ((w as f32 - self.text_w) / 2.0).max(PAD_X) };
+            let layout = D2D_RECT_F { left: text_x, top: text_y, right: 100000.0, bottom: 100000.0 };
             self.rt.DrawText(
                 &tc,
                 &self.text_format,
@@ -214,14 +221,14 @@ impl Renderer {
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
-            // 按钮图形
-            if pinned {
-                if hovering {
+            // 按钮图形（仅悬停时显示）
+            if hovering {
+                if pinned {
                     self.draw_pin_filled(dark_bg);
+                } else {
+                    self.draw_pin_hollow(dark_bg);
+                    self.draw_close(dark_bg);
                 }
-            } else {
-                self.draw_pin_hollow(dark_bg);
-                self.draw_close(dark_bg);
             }
             if let Err(e) = self.rt.EndDraw(None, None) {
                 crate::log::Log::log(&format!("EndDraw failed: {e}"));

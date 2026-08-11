@@ -1,5 +1,9 @@
 //! 悬浮窗：无边框分层窗口（WS_EX_LAYERED|TOPMOST|TOOLWINDOW|NOACTIVATE），
-//! 支持拖动、固定（鼠标穿透）、关闭（隐藏）。固定状态仅在本次运行内保留。
+//! 支持拖动、固定（鼠标穿透）、关闭（隐藏，后台继续常驻；托盘可随时唤回）。固定状态仅在本次运行内保留。
+//!
+//! 悬停展开：鼠标未悬停时仅显示居中时间（无背景无按钮），悬停时亮出背景与按钮。
+//! 非固定模式由 WM_MOUSEMOVE/TrackMouseEvent 即时驱动；固定模式（鼠标穿透）收不到
+//! 鼠标消息，由 250ms 轮询驱动同一状态，兼作 1.5s 自动解除固定。
 //!
 //! 窗口与 D2D 渲染器延迟到首次全屏显示时创建（ensure_created），
 //! 静默驻留期间不加载 D2D/DWrite、不持有窗口，常驻内存最小化。
@@ -13,7 +17,10 @@ use windows::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Controls::{HOVER_DEFAULT, WM_MOUSELEAVE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::log::Log;
@@ -35,7 +42,7 @@ pub struct Floater {
     renderer: Option<Renderer>,
     /// 固定模式：隐藏按钮 + 鼠标穿透（WS_EX_TRANSPARENT）
     pinned: bool,
-    /// 固定模式下鼠标悬停窗口（视觉反馈 + 计时解除固定）
+    /// 鼠标悬停窗口：悬停展开完整 UI；固定模式下兼作“即将解除”计时反馈
     hovering: bool,
     hover_ms: u32,
     visible: bool,
@@ -131,10 +138,12 @@ impl Floater {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             SetTimer(Some(hwnd), ID_TIMER, 1000, None); // 每秒刷新时间
         }
+        // 窗口恰好出现在光标下方时立即展开（否则要等鼠标移动才触发 WM_MOUSEMOVE）
+        self.on_hover_move();
         Log::log("floater shown");
     }
 
-    /// 全屏退出 / 点击 X：隐藏，后台继续运行等待下次全屏。
+    /// 全屏退出 / 点击 X：隐藏，后台继续运行等待下次全屏（或托盘唤回）。
     pub fn hide(&mut self) {
         if !self.visible {
             return;
@@ -186,9 +195,14 @@ impl Floater {
                 SetTimer(Some(hwnd), ID_HOVER, HOVER_TICK_MS, None);
             } else {
                 let _ = KillTimer(Some(hwnd), ID_HOVER);
+                // 解除固定后光标仍在窗口上则恢复展开态（固定模式由轮询驱动，无 WM_MOUSEMOVE）
+                if self.visible && self.cursor_over(hwnd) {
+                    self.hovering = true;
+                    self.arm_leave_tracking(hwnd);
+                }
             }
         }
-        self.render_now(hwnd); // 重绘以隐藏/显示按钮
+        self.render_now(hwnd); // 重绘以切换悬停展开/收起
         Log::log(if pinned { "pinned (mouse passthrough on)" } else { "unpinned (mouse passthrough off)" });
     }
 
@@ -199,27 +213,71 @@ impl Floater {
             return;
         }
         let Some(hwnd) = self.hwnd else { return };
+        let inside = self.cursor_over(hwnd);
+        if inside {
+            self.hover_ms += HOVER_TICK_MS;
+            if self.hover_ms >= HOVER_UNPIN_MS {
+                Log::log("hover timeout: unpinning");
+                self.set_pinned(false);
+                return;
+            }
+        } else {
+            self.hover_ms = 0;
+        }
+        if inside != self.hovering {
+            self.hovering = inside;
+            self.render_now(hwnd); // 图钉实心提示浮现/消失
+        }
+    }
+
+    /// 光标当前是否位于窗口矩形内（非固定模式首帧检测与固定模式轮询共用）。
+    fn cursor_over(&self, hwnd: HWND) -> bool {
         unsafe {
             let mut cur = POINT::default();
             let _ = GetCursorPos(&mut cur);
             let mut wr = RECT::default();
             let _ = GetWindowRect(hwnd, &mut wr);
-            let inside = cur.x >= wr.left && cur.x < wr.right && cur.y >= wr.top && cur.y < wr.bottom;
-            let now_hovering = inside && self.visible;
-            if inside {
-                self.hover_ms += HOVER_TICK_MS;
-                if self.hover_ms >= HOVER_UNPIN_MS {
-                    Log::log("hover timeout: unpinning");
-                    self.set_pinned(false);
-                    return;
-                }
-            } else {
-                self.hover_ms = 0;
-            }
-            if now_hovering != self.hovering {
-                self.hovering = now_hovering;
-                self.render_now(hwnd); // 图钉实心提示浮现/消失
-            }
+            cur.x >= wr.left && cur.x < wr.right && cur.y >= wr.top && cur.y < wr.bottom
+        }
+    }
+
+    /// 悬停移动（非固定模式，WM_MOUSEMOVE）：展开完整 UI。
+    /// 每次移动重新武装离开跟踪（幂等），移出窗口时系统发 WM_MOUSELEAVE 收起。
+    fn on_hover_move(&mut self) {
+        if self.pinned || !self.visible {
+            return;
+        }
+        let Some(hwnd) = self.hwnd else { return };
+        self.arm_leave_tracking(hwnd);
+        if !self.hovering {
+            self.hovering = true;
+            self.hover_ms = 0;
+            self.render_now(hwnd);
+        }
+    }
+
+    /// 悬停离开（WM_MOUSELEAVE）：收起为纯文字。
+    fn on_mouseleave(&mut self) {
+        if self.pinned || !self.visible || !self.hovering {
+            return;
+        }
+        self.hovering = false;
+        self.hover_ms = 0;
+        if let Some(hwnd) = self.hwnd {
+            self.render_now(hwnd);
+        }
+    }
+
+    /// 武装鼠标离开跟踪：鼠标移出窗口矩形时系统发 WM_MOUSELEAVE。
+    fn arm_leave_tracking(&self, hwnd: HWND) {
+        unsafe {
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: HOVER_DEFAULT,
+            };
+            let _ = TrackMouseEvent(&mut tme);
         }
     }
 
@@ -335,6 +393,14 @@ impl Floater {
         if self.dragging {
             self.dragging = false;
             unsafe { let _ = ReleaseCapture(); }
+            // 拖拽期间鼠标可能移出窗口（capture 不触发 WM_MOUSELEAVE），松手时校验收起；
+            // dragging 仅在 on_lbuttondown 取得 hwnd 后置位，此处 hwnd 必存在
+            let Some(hwnd) = self.hwnd else { return };
+            if !self.pinned && self.hovering && !self.cursor_over(hwnd) {
+                self.hovering = false;
+                self.hover_ms = 0;
+                self.render_now(hwnd);
+            }
         }
     }
 }
@@ -362,6 +428,11 @@ unsafe extern "system" fn floater_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             }
             WM_MOUSEMOVE => {
                 floater.on_mousemove();
+                floater.on_hover_move();
+                LRESULT(0)
+            }
+            WM_MOUSELEAVE => {
+                floater.on_mouseleave();
                 LRESULT(0)
             }
             WM_LBUTTONUP => {

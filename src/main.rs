@@ -109,7 +109,10 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             }
             WM_COMMAND => {
                 let id = wparam.0 & 0xffff;
-                if id == tray::TRAY_CMD_EXIT {
+                if id == tray::TRAY_CMD_SHOW {
+                    Log::log("tray: show floater");
+                    app.floater.show();
+                } else if id == tray::TRAY_CMD_EXIT {
                     app.request_exit();
                 }
                 LRESULT(0)
