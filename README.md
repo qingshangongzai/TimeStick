@@ -21,6 +21,18 @@ cargo build --release
   加载，失败自动回退 GDI 表盘）
 - 重新生成：`python scripts/make_icon.py`（依赖 `pip install resvg-py pillow`）
 
+## 安装包（NSIS）
+
+```powershell
+powershell -File scripts\build_installer.ps1   # 产出 target\TimeStick-<版本>-setup.exe
+```
+
+- 前置：本机已安装 NSIS 3.x（`D:\Tools\NSIS\makensis.exe`，可下载 `nsis-3.10.zip` 解压即用，
+  无需安装）；也可在**项目根目录**直接 `"D:\Tools\NSIS\makensis.exe" installer.nsi` 手动构建
+- `installer.nsi` 为安装脚本：简体中文界面（MUI2）、安装到 `Program Files\TimeStick`、
+  开始菜单快捷方式、控制面板卸载条目、卸载器（先结束运行中的实例）、安装包图标与版本信息
+- 版本号从 `Cargo.toml` 读取；发布新版本后重新运行脚本即可
+
 ## 使用
 
 双击 `timestick.exe` 即可（建议创建桌面快捷方式）。启动后静默驻留系统托盘，无主界面。
