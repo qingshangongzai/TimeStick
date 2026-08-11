@@ -6,6 +6,7 @@
 
 mod detect;
 mod floater;
+mod icon;
 mod log;
 mod render;
 mod tray;
@@ -37,11 +38,17 @@ struct App {
     main_hwnd: HWND,
     floater: floater::Floater,
     tray: tray::Tray,
+    /// 内嵌图标句柄（与悬浮窗类共用，退出时销毁，见 src/icon.rs）
+    hicon: HICON,
+    hicon_sm: HICON,
 }
 
 impl App {
     fn new(hinst: HINSTANCE) -> Result<Self> {
-        let floater = floater::Floater::new(hinst);
+        // 内嵌图标：窗口类 hIcon/hIconSm 与悬浮窗类共用；加载失败保持默认
+        let hicon = icon::load(icon::LARGE).unwrap_or_default();
+        let hicon_sm = icon::load(icon::SMALL).unwrap_or_default();
+        let floater = floater::Floater::new(hinst, hicon, hicon_sm);
 
         // 隐藏主窗口：承载托盘回调、全局热键与全屏消息
         let class = w!("TimeStickMain");
@@ -52,19 +59,19 @@ impl App {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: hinst,
-            hIcon: HICON::default(),
+            hIcon: hicon,
             hCursor: unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() },
             hbrBackground: HBRUSH::default(),
             lpszMenuName: PCWSTR::null(),
             lpszClassName: class,
-            hIconSm: HICON::default(),
+            hIconSm: hicon_sm,
         };
         unsafe { let _ = RegisterClassExW(&wc); }
         let main_hwnd = unsafe {
             CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("TimeStick"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst), None)?
         };
         let tray = tray::Tray::new(main_hwnd)?;
-        Ok(App { main_hwnd, floater, tray })
+        Ok(App { main_hwnd, floater, tray, hicon, hicon_sm })
     }
 
     fn request_exit(&mut self) {
@@ -77,6 +84,13 @@ impl App {
             }
             // 触发 WM_DESTROY → PostQuitMessage 结束消息循环
             let _ = DestroyWindow(self.main_hwnd);
+        }
+        // 销毁内嵌图标句柄（悬浮窗类共用同一份，此处统一释放）
+        if !self.hicon.is_invalid() {
+            unsafe { let _ = DestroyIcon(self.hicon); }
+        }
+        if !self.hicon_sm.is_invalid() {
+            unsafe { let _ = DestroyIcon(self.hicon_sm); }
         }
     }
 }

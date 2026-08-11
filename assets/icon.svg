@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>TimeStick 时间贴</title>
+  <desc>天蓝圆角方块底 + 白色表盘：全屏时间悬浮窗图标源</desc>
+
+  <defs>
+    <!-- 蓝底：天蓝纵向渐变（上亮下略深） -->
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#66CCFF"/>
+      <stop offset="1" stop-color="#4FC3F7"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 蓝色圆角方块底（236×236 居中，圆角 52） -->
+  <rect x="10" y="10" width="236" height="236" rx="52" fill="url(#tile)"/>
+
+  <!-- 表盘：白色盘面 + 深蓝灰描边 -->
+  <circle cx="128" cy="128" r="66" fill="#FFFFFF"/>
+  <circle cx="128" cy="128" r="66" fill="none" stroke="#37474F" stroke-width="10"/>
+
+  <!-- 指针（10:10 经典角度，圆头）：时针指向 10 点略过 5°，分针指向 2 点 -->
+  <g stroke="#37474F" stroke-linecap="round">
+    <line x1="128" y1="128" x2="101" y2="109.1" stroke-width="11"/>
+    <line x1="128" y1="128" x2="169.6" y2="104" stroke-width="8.5"/>
+  </g>
+  <!-- 中心点 -->
+  <circle cx="128" cy="128" r="12" fill="#37474F"/>
+</svg>

@@ -1,5 +1,5 @@
-//! 系统托盘：运行时绘制表盘图标（GDI → CreateIconIndirect），
-//! 右键弹出菜单【直接退出】。
+//! 系统托盘：优先加载 exe 内嵌图标（与文件图标同一设计源，见 src/icon.rs），
+//! 失败时回退到 GDI 绘制的表盘；右键弹出菜单【直接退出】。
 
 use std::mem::size_of;
 use std::ptr::null_mut;
@@ -21,11 +21,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HICON, WM_RBUTTONUP,
 };
 
+use crate::icon;
 use crate::log::Log;
 
 pub const TRAY_CMD_EXIT: usize = 1001;
 const TRAY_ID: u32 = 1;
-const ICON_SIZE: i32 = 32;
 
 pub struct Tray {
     hwnd: HWND,
@@ -35,7 +35,18 @@ pub struct Tray {
 
 impl Tray {
     pub fn new(hwnd: HWND) -> Result<Self> {
-        let icon = create_clock_icon()?;
+        // 优先加载内嵌图标（与 exe 图标同一设计源，见 src/icon.rs）；
+        // 失败时回退到 GDI 绘制的表盘，保证托盘图标永不为空。
+        let icon = match icon::load(icon::LARGE) {
+            Some(h) => {
+                Log::log("tray icon: embedded resource");
+                h
+            }
+            None => {
+                Log::log("tray icon: fallback to GDI clock");
+                create_clock_icon()?
+            }
+        };
         let mut tip = [0u16; 128];
         for (i, c) in "TimeStick 时间贴".encode_utf16().take(127).enumerate() {
             tip[i] = c;
@@ -104,7 +115,7 @@ impl Drop for Tray {
 /// 再经 CreateIconIndirect 转为 HICON —— 免去 .ico 资源文件，保持单 exe 自包含。
 fn create_clock_icon() -> Result<HICON> {
     unsafe {
-        let s = ICON_SIZE;
+        let s = icon::LARGE;
         let mut bits: *mut std::ffi::c_void = null_mut();
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {

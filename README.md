@@ -11,7 +11,15 @@
 cargo build --release
 ```
 
-产物：`target/release/timestick.exe`（约 150KB，无任何第三方运行时依赖）。
+产物：`target/release/timestick.exe`（约 170KB，无任何第三方运行时依赖）。
+
+## 图标
+
+- `assets/icon.svg`：图标设计源（天蓝圆角方块 + 白色表盘，10:10 指针），改图只编辑此文件
+- `assets/icon.ico`：由 SVG 生成的多尺寸产物（16/24/32/48/64/128/256px），经 `build.rs`
+  （winres）嵌入 exe；资源管理器、托盘图标统一为该设计（托盘运行时从内嵌资源 `LoadImageW`
+  加载，失败自动回退 GDI 表盘）
+- 重新生成：`python scripts/make_icon.py`（依赖 `pip install resvg-py pillow`）
 
 ## 使用
 

@@ -28,6 +28,9 @@ const MARGIN: i32 = 24; // 默认位置距屏幕边缘边距
 /// 悬浮窗组件。
 pub struct Floater {
     hinst: HINSTANCE,
+    /// 内嵌图标句柄（与主窗口类共用，所有权在 App，退出时统一销毁）
+    hicon: HICON,
+    hicon_sm: HICON,
     hwnd: Option<HWND>,
     renderer: Option<Renderer>,
     /// 固定模式：隐藏按钮 + 鼠标穿透（WS_EX_TRANSPARENT）
@@ -44,9 +47,11 @@ pub struct Floater {
 }
 
 impl Floater {
-    pub fn new(hinst: HINSTANCE) -> Self {
+    pub fn new(hinst: HINSTANCE, hicon: HICON, hicon_sm: HICON) -> Self {
         Floater {
             hinst,
+            hicon,
+            hicon_sm,
             hwnd: None,
             renderer: None,
             pinned: false,
@@ -83,13 +88,13 @@ impl Floater {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: self.hinst,
-            hIcon: HICON::default(),
+            hIcon: self.hicon,
             // 类光标必须显式指定：NULL 时鼠标移入窗口系统会显示“忙/等待”光标
             hCursor: unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() },
             hbrBackground: HBRUSH::default(),
             lpszMenuName: PCWSTR::null(),
             lpszClassName: class,
-            hIconSm: HICON::default(),
+            hIconSm: self.hicon_sm,
         };
         unsafe { let _ = RegisterClassExW(&wc); }
 

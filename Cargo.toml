@@ -22,6 +22,10 @@ windows = { version = "0.62.2", features = [
 ] }
 windows-numerics = "0.3"
 
+[build-dependencies]
+# 构建期把 assets/icon.ico 嵌入 exe（仅构建工具，不增加运行时依赖）
+winres = "0.1"
+
 [profile.release]
 opt-level = "z"
 lto = true
