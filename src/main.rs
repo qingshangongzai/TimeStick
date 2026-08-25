@@ -8,6 +8,7 @@ mod detect;
 mod floater;
 mod icon;
 mod log;
+mod position;
 mod render;
 mod tray;
 

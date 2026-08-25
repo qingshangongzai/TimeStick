@@ -24,6 +24,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::log::Log;
+use crate::position;
 use crate::render::Renderer;
 
 const ID_TIMER: usize = 1; // 时间刷新（1000ms）
@@ -124,7 +125,12 @@ impl Floater {
             return;
         }
         self.visible = true;
-        let pos = self.pos.unwrap_or_else(|| self.default_pos());
+        // 首次显示：恢复上次会话位置；无记录或换算失败 → 默认主屏右下角
+        let pos = self.pos.unwrap_or_else(|| {
+            // ensure_created 刚成功，renderer 必为 Some（规范豁免的 unwrap 点）
+            let size = self.renderer.as_ref().unwrap().size;
+            position::load(size).unwrap_or_else(|| self.default_pos())
+        });
         self.pos = Some(pos);
         Log::log(&format!("floater shown at ({}, {})", pos.x, pos.y));
         let hwnd = self.hwnd.unwrap();
@@ -401,6 +407,8 @@ impl Floater {
                 self.hover_ms = 0;
                 self.render_now(hwnd);
             }
+            // 拖动结束：持久化当前大致位置（跨重启恢复，见 position.rs）
+            position::save(hwnd);
         }
     }
 }
