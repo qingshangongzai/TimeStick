@@ -137,6 +137,11 @@ impl Floater {
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             SetTimer(Some(hwnd), ID_TIMER, 1000, None); // 每秒刷新时间
+            // hide() 会杀掉 ID_HOVER；固定状态跨全屏会话保留，须按 pinned 恢复，
+            // 否则悬停 1.5s 自动解除固定与固定模式悬停展开反馈永久失效
+            if self.pinned {
+                SetTimer(Some(hwnd), ID_HOVER, HOVER_TICK_MS, None);
+            }
         }
         // 窗口恰好出现在光标下方时立即展开（否则要等鼠标移动才触发 WM_MOUSEMOVE）
         self.on_hover_move();
