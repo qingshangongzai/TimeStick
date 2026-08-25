@@ -5,7 +5,7 @@ use std::mem::size_of;
 use std::ptr::null_mut;
 
 use windows::core::{w, BOOL, HRESULT, Result};
-use windows::Win32::Foundation::{COLORREF, GetLastError, HWND, LPARAM, POINT};
+use windows::Win32::Foundation::{COLORREF, GetLastError, HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreatePen, CreateSolidBrush, DeleteDC,
     DeleteObject, Ellipse, GetStockObject, LineTo, MoveToEx, SelectObject, BI_RGB, BITMAPINFO,
@@ -17,8 +17,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
-    ICONINFO, MF_STRING, MENU_ITEM_FLAGS, SetForegroundWindow, TPM_RIGHTBUTTON, TrackPopupMenu,
-    HICON, WM_RBUTTONUP,
+    ICONINFO, MF_STRING, MENU_ITEM_FLAGS, PostMessageW, SetForegroundWindow, TPM_RIGHTBUTTON,
+    TrackPopupMenu, HICON, WM_NULL, WM_RBUTTONUP,
 };
 
 use crate::icon;
@@ -87,6 +87,8 @@ impl Tray {
             let _ = GetCursorPos(&mut pt);
             // 不启用 TPM_RETURNCMD/TPM_NONOTIFY：菜单命令经 WM_COMMAND 送达主窗口
             let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, None, self.hwnd, None);
+            // 补发空消息完成前台切换（KB135788 标准套路），否则下次右键托盘可能需点两次
+            let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(menu);
         }
     }

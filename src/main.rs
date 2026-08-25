@@ -171,8 +171,7 @@ fn main() -> Result<()> {
         }
     }
     let main_hwnd = app.main_hwnd;
-    let floater_hwnd = app.floater.hwnd();
-    detect::spawn(main_hwnd, floater_hwnd);
+    detect::spawn(main_hwnd);
 
     // 消息循环
     let mut msg = MSG::default();

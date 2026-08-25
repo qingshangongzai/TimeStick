@@ -72,11 +72,6 @@ impl Floater {
         }
     }
 
-    /// 悬浮窗窗口句柄（未创建时为默认值）。
-    pub fn hwnd(&self) -> HWND {
-        self.hwnd.unwrap_or_default()
-    }
-
     /// 取出窗口句柄（退出清理用）。
     pub fn take_hwnd(&mut self) -> Option<HWND> {
         self.hwnd.take()
@@ -145,7 +140,6 @@ impl Floater {
         }
         // 窗口恰好出现在光标下方时立即展开（否则要等鼠标移动才触发 WM_MOUSEMOVE）
         self.on_hover_move();
-        Log::log("floater shown");
     }
 
     /// 全屏退出 / 点击 X：隐藏，后台继续运行等待下次全屏（或托盘唤回）。
@@ -290,7 +284,8 @@ impl Floater {
         unsafe {
             let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
             let mon = MonitorFromWindow(HWND::default(), MONITOR_DEFAULTTOPRIMARY);
-            let (w, h) = self.renderer.as_ref().map(|r| r.size).unwrap_or((0, 0));
+            // 仅 show() 在 ensure_created 成功后调用，renderer 必为 Some（规范豁免的 unwrap 点）
+            let (w, h) = self.renderer.as_ref().unwrap().size;
             if GetMonitorInfoW(mon, &mut mi).as_bool() {
                 let m = mi.rcMonitor;
                 POINT { x: m.right - w - MARGIN, y: m.bottom - h - MARGIN }
@@ -399,8 +394,8 @@ impl Floater {
             self.dragging = false;
             unsafe { let _ = ReleaseCapture(); }
             // 拖拽期间鼠标可能移出窗口（capture 不触发 WM_MOUSELEAVE），松手时校验收起；
-            // dragging 仅在 on_lbuttondown 取得 hwnd 后置位，此处 hwnd 必存在
-            let Some(hwnd) = self.hwnd else { return };
+            // dragging 仅在 on_lbuttondown 取得 hwnd 后置位，此处 hwnd 必存在（规范豁免的 unwrap 点）
+            let hwnd = self.hwnd.unwrap();
             if !self.pinned && self.hovering && !self.cursor_over(hwnd) {
                 self.hovering = false;
                 self.hover_ms = 0;

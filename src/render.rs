@@ -342,7 +342,8 @@ impl Renderer {
         let row = w as usize * 4;
         let mut data = Vec::with_capacity(row * h as usize);
         unsafe {
-            for y in 0..h as usize {
+            // BMP 文件头 biHeight 为正值，标准语义自底向上；DIB 为自顶向下，须逆序拷贝行
+            for y in (0..h as usize).rev() {
                 data.extend_from_slice(std::slice::from_raw_parts(self.bits.add(y * row), row));
             }
         }

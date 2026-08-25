@@ -55,6 +55,8 @@ Section "安装" SecMain
   ; 开始菜单快捷方式放公共位置（All Users），卸载段必须对称设置
   SetRegView 64
   SetShellVarContext all
+  ; 先结束运行中的实例（覆盖安装时 exe 被占用无法写入；未运行时 taskkill 空跑无害）
+  nsExec::ExecToStack 'taskkill /F /IM "${APP_EXE}"'
   SetOutPath "$INSTDIR"
   File "target\release\${APP_EXE}"
 

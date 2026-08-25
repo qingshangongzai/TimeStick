@@ -15,24 +15,22 @@ use crate::WM_APP_FS;
 
 /// 启动全屏检测线程。轮询优于事件监听：播放器原地切换全屏（前台窗口不变）时
 /// WinEventHook 可能不触发，而 1Hz 轮询开销可忽略。
-pub fn spawn(main_hwnd: HWND, floater_hwnd: HWND) {
+pub fn spawn(main_hwnd: HWND) {
     // 0.62 中 HWND 未实现 Send，闭包以 usize 传递句柄
     let main_hwnd = main_hwnd.0 as usize;
-    let floater_hwnd = floater_hwnd.0 as usize;
     thread::spawn(move || {
         let main_hwnd = HWND(main_hwnd as *mut std::ffi::c_void);
-        let floater_hwnd = HWND(floater_hwnd as *mut std::ffi::c_void);
         let mut prev = false;
         loop {
             thread::sleep(Duration::from_millis(1000));
-            let cur = is_fullscreen(floater_hwnd);
+            let cur = is_fullscreen();
             if cur == prev {
                 continue;
             }
             if cur {
                 // 防抖：1.5s 后复核，仍全屏才通知显示，避免频繁切换闪烁
                 thread::sleep(Duration::from_millis(1500));
-                if !is_fullscreen(floater_hwnd) {
+                if !is_fullscreen() {
                     continue;
                 }
             }
@@ -42,12 +40,12 @@ pub fn spawn(main_hwnd: HWND, floater_hwnd: HWND) {
     });
 }
 
-/// 判定前台窗口是否完整覆盖主显示器。
+/// 判定前台窗口是否完整覆盖其所在显示器（副屏全屏同样触发；悬浮窗固定主屏显示）。
 /// 排除规则：带 WS_MAXIMIZE 的窗口（任务栏自动隐藏时最大化同样覆盖全屏，属误报）。
-fn is_fullscreen(floater_hwnd: HWND) -> bool {
+fn is_fullscreen() -> bool {
     unsafe {
         let fg = GetForegroundWindow();
-        if fg.is_invalid() || fg == floater_hwnd {
+        if fg.is_invalid() {
             return false;
         }
         let root = GetAncestor(fg, GA_ROOT);
