@@ -16,6 +16,7 @@
 
 #![windows_subsystem = "windows"]
 
+mod about;
 mod detect;
 mod floater;
 mod icon;
@@ -42,6 +43,7 @@ use crate::log::Log;
 pub const WM_APP_TRAY: u32 = WM_APP + 1; // 托盘回调
 pub const WM_APP_FS: u32 = WM_APP + 2;   // 全屏状态变化，wparam: 1=进入 0=退出
 pub const WM_APP_EXIT: u32 = WM_APP + 3; // 请求退出
+pub const WM_APP_ABOUT_CLOSED: u32 = WM_APP + 4; // 关于对话框已销毁（无参数约定）
 
 pub const HOTKEY_ID: i32 = 1; // Ctrl+Alt+T：固定模式解除固定
 
@@ -54,6 +56,8 @@ struct App {
     /// 内嵌图标句柄（与悬浮窗类共用，退出时销毁，见 src/icon.rs）
     hicon: HICON,
     hicon_sm: HICON,
+    /// 关于对话框句柄（防重入；销毁经 WM_APP_ABOUT_CLOSED 清空）
+    about_hwnd: Option<HWND>,
 }
 
 impl App {
@@ -84,7 +88,7 @@ impl App {
             CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("TimeStick"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst), None)?
         };
         let tray = tray::Tray::new(main_hwnd)?;
-        Ok(App { main_hwnd, floater, tray, hicon, hicon_sm })
+        Ok(App { main_hwnd, floater, tray, hicon, hicon_sm, about_hwnd: None })
     }
 
     fn request_exit(&mut self) {
@@ -125,6 +129,9 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                 if id == tray::TRAY_CMD_SHOW {
                     Log::log("tray: show floater");
                     app.floater.show();
+                } else if id == tray::TRAY_CMD_ABOUT {
+                    Log::log("tray: about");
+                    about::show(&mut app.about_hwnd, app.main_hwnd);
                 } else if id == tray::TRAY_CMD_EXIT {
                     app.request_exit();
                 }
@@ -149,6 +156,10 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             }
             WM_APP_EXIT => {
                 app.request_exit();
+                LRESULT(0)
+            }
+            WM_APP_ABOUT_CLOSED => {
+                app.about_hwnd = None;
                 LRESULT(0)
             }
             WM_DESTROY => {
