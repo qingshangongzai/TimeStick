@@ -1,3 +1,15 @@
+/*
+ * Copyright (c) 2026 青山公仔
+ * TimeStick（时间贴）is licensed under Mulan PSL v2.
+ * You can use this software according to the terms and conditions of the Mulan PSL v2.
+ * You may obtain a copy of Mulan PSL v2 at:
+ *     http://license.coscl.org.cn/MulanPSL2
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+ * See the Mulan PSL v2 for more details.
+ */
+
 //! D2D/DWrite 渲染管线：将时间文字与按钮绘制到 32bpp ARGB 位图（每像素 Alpha），
 //! 再经 UpdateLayeredWindow 整体提交 —— 实现“半透明圆角背景 + 不透明文字”。
 //!
