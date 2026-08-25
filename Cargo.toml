@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["青山公仔"]
 description = "全屏时间悬浮窗 —— 极轻量级 Windows 桌面常驻工具"
+license = "MulanPSL-2.0"
 
 [dependencies]
 windows = { version = "0.62.2", features = [

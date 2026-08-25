@@ -1,3 +1,15 @@
+/*
+ * Copyright (c) 2026 青山公仔
+ * TimeStick（时间贴）is licensed under Mulan PSL v2.
+ * You can use this software according to the terms and conditions of the Mulan PSL v2.
+ * You may obtain a copy of Mulan PSL v2 at:
+ *     http://license.coscl.org.cn/MulanPSL2
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+ * See the Mulan PSL v2 for more details.
+ */
+
 //! 内嵌图标加载：读取 build.rs 嵌入的组图标资源（ID 1，见 build.rs），
 //! 供托盘（32px）与窗口类（32px/16px）复用；加载失败返回 None，由调用方回退。
 
