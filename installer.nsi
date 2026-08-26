@@ -12,7 +12,7 @@ Unicode true
   !define VERSION "0.1.0"
 !endif
 !define PRODUCT_NAME   "TimeStick"
-!define PRODUCT_ZH     "TimeStick 时间贴"
+!define PRODUCT_ZH     "时间贴"
 !define PUBLISHER      "青山公仔"
 !define APP_EXE        "timestick.exe"
 !define APP_ICO        "assets\icon.ico"
@@ -40,7 +40,7 @@ SetCompressor /SOLID lzma
 !define MUI_UNICON "${APP_ICO}"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
-!define MUI_FINISHPAGE_RUN_TEXT "立即运行 TimeStick"
+!define MUI_FINISHPAGE_RUN_TEXT "立即运行 时间贴"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES

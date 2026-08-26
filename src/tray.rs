@@ -66,7 +66,7 @@ impl Tray {
             }
         };
         let mut tip = [0u16; 128];
-        for (i, c) in "TimeStick 时间贴".encode_utf16().take(127).enumerate() {
+        for (i, c) in "时间贴".encode_utf16().take(127).enumerate() {
             tip[i] = c;
         }
         let nid = NOTIFYICONDATAW {

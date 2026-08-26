@@ -108,7 +108,7 @@ pub fn show(about_hwnd: &mut Option<HWND>, owner: HWND) {
         let Ok(hwnd) = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             ABOUT_CLASS,
-            w!("关于 TimeStick"),
+            w!("关于 时间贴"),
             WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -232,7 +232,7 @@ unsafe fn setup(hwnd: HWND, owner: HWND, dpi: u32) {
         let _ = SendMessageW(st.icon_st, STM_SETICON, Some(WPARAM(icon.0 as usize)), Some(LPARAM(0)));
         let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(icon.0 as isize)));
         let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(st.icon_sm.0 as isize)));
-        st.name_st = create_child(hwnd, w!("Static"), w!("TimeStick 时间贴"), st_basic, None);
+        st.name_st = create_child(hwnd, w!("Static"), w!("时间贴"), st_basic, None);
         st.ver_st = create_child(hwnd, w!("Static"), PCWSTR::null(), st_basic, None);
         set_text(
             st.ver_st,
