@@ -83,12 +83,16 @@ if ($fh) {
     Write-Host "`n!! 未找到悬浮窗"
 }
 
-# 3. 关闭全屏窗口 → 立即隐藏
+# 3. 关闭全屏窗口 → 立即隐藏（隐藏即销毁：窗口与渲染器随隐藏释放，见内存优化方案）
 Write-Host "`n=== 关闭全屏窗口 ==="
 [FsWin]::DestroyWindow2() | Out-Null
 Start-Sleep -Seconds 3
 $fh2 = Get-FloaterWindow
-Write-Host "悬浮窗可见: $([FsWin]::IsWindowVisible($fh2)) （期望 False）"
+if ($fh2 -eq $null) {
+    Write-Host "悬浮窗已销毁（隐藏即销毁，等价于不可见）"
+} else {
+    Write-Host "悬浮窗可见: $([FsWin]::IsWindowVisible($fh2)) （期望 False）"
+}
 Write-Host "日志（期望 fullscreen exited + floater hidden）:"
 Get-Content $log | Select-Object -Last 3 | ForEach-Object { Write-Host "  $_" }
 

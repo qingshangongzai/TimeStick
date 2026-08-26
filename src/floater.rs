@@ -17,7 +17,7 @@
 //! 非固定模式由 WM_MOUSEMOVE/TrackMouseEvent 即时驱动；固定模式（鼠标穿透）收不到
 //! 鼠标消息，由 250ms 轮询驱动同一状态，兼作 1.5s 自动解除固定。
 //!
-//! 窗口与 D2D 渲染器延迟到首次全屏显示时创建（ensure_created），
+//! 窗口与 D2D 渲染器延迟到首次全屏显示时创建（ensure_created），隐藏时销毁（hide），
 //! 静默驻留期间不加载 D2D/DWrite、不持有窗口，常驻内存最小化。
 
 use std::mem::size_of;
@@ -146,6 +146,10 @@ impl Floater {
         self.pos = Some(pos);
         Log::log(&format!("floater shown at ({}, {})", pos.x, pos.y));
         let hwnd = self.hwnd.unwrap();
+        // 重建后恢复固定模式的鼠标穿透样式（ID_HOVER 定时器由下方既有分支恢复）
+        if self.pinned {
+            self.apply_pinned_style(hwnd, true);
+        }
         self.render_now(hwnd);
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -174,8 +178,11 @@ impl Floater {
             let _ = ReleaseCapture();
             let _ = KillTimer(Some(hwnd), ID_TIMER);
             let _ = KillTimer(Some(hwnd), ID_HOVER);
-            let _ = ShowWindow(hwnd, SW_HIDE);
+            let _ = DestroyWindow(hwnd);
         }
+        // 隐藏即销毁：窗口与渲染器随隐藏释放，内存回落至静默态；再次显示经 ensure_created 重建
+        self.hwnd = None;
+        self.renderer = None; // Renderer::drop：SelectObject 还原 → DeleteObject → DeleteDC（render.rs 既有实现）
         Log::log("floater hidden");
     }
 
@@ -184,6 +191,21 @@ impl Floater {
         if self.pinned {
             self.set_pinned(false);
             Log::log("hotkey: unpinned");
+        }
+    }
+
+    /// 应用/移除鼠标穿透扩展样式（窗口重建后须恢复，见 show()）。
+    fn apply_pinned_style(&self, hwnd: HWND, pinned: bool) {
+        unsafe {
+            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            let new_ex = if pinned {
+                ex | WS_EX_TRANSPARENT.0 as isize
+            } else {
+                ex & !(WS_EX_TRANSPARENT.0 as isize)
+            };
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex);
+            // FRAMECHANGED：使扩展样式变更立即生效
+            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
     }
 
@@ -198,16 +220,8 @@ impl Floater {
         self.hovering = false;
         self.hover_ms = 0;
         let Some(hwnd) = self.hwnd else { return };
+        self.apply_pinned_style(hwnd, pinned);
         unsafe {
-            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            let new_ex = if pinned {
-                ex | WS_EX_TRANSPARENT.0 as isize
-            } else {
-                ex & !(WS_EX_TRANSPARENT.0 as isize)
-            };
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex);
-            // FRAMECHANGED：使扩展样式变更立即生效
-            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
             if pinned {
                 SetTimer(Some(hwnd), ID_HOVER, HOVER_TICK_MS, None);
             } else {
