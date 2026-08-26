@@ -95,7 +95,7 @@ impl Tray {
             let _ = SetForegroundWindow(self.hwnd);
             let Ok(menu) = CreatePopupMenu() else { return };
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_SHOW, w!("显示悬浮窗"));
-            let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_ABOUT, w!("关于 TimeStick"));
+            let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_ABOUT, w!("关于"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_EXIT, w!("直接退出"));
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);

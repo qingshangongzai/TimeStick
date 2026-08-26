@@ -21,9 +21,13 @@ use windows::Win32::UI::WindowsAndMessaging::{LoadImageW, HICON, IMAGE_ICON, LR_
 /// 组图标资源 ID（winres 的 set_icon 固定分配为 1）。
 const APP_ICON_ID: u16 = 1;
 
-/// 图标加载尺寸：hIcon / 托盘（32px，含高 DPI 缩放余量）。
+/// 图标加载基准尺寸（96 DPI 逻辑像素）：窗口大图标/托盘 32；
+/// 关于对话框按实际 DPI 换算物理尺寸传入（如 150% 传 48，命中 .ico 精确帧）；
+/// 主窗口类/托盘图标保持基准尺寸即可（系统按需自行缩放）。
 pub const LARGE: i32 = 32;
-/// 图标加载尺寸：hIconSm（16px，标题栏小图标）。
+/// 图标加载基准尺寸（96 DPI 逻辑像素）：标题栏小图标 16；
+/// 关于对话框按实际 DPI 换算物理尺寸传入（如 150% 传 24，命中 .ico 精确帧）；
+/// 主窗口类 hIconSm 保持基准尺寸即可（系统按需自行缩放）。
 pub const SMALL: i32 = 16;
 
 /// 加载指定尺寸的内嵌图标；调用方负责 DestroyIcon。
