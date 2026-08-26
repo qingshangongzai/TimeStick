@@ -16,11 +16,12 @@ use std::mem::size_of;
 use std::thread;
 use std::time::Duration;
 
+use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, PostMessageW, GA_ROOT,
-    GWL_STYLE, WS_CAPTION, WS_MAXIMIZE, WS_THICKFRAME,
+    GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, PostMessageW,
+    GA_ROOT, GWL_STYLE, WS_CAPTION, WS_MAXIMIZE, WS_THICKFRAME,
 };
 
 use crate::WM_APP_FS;
@@ -53,7 +54,8 @@ pub fn spawn(main_hwnd: HWND) {
 }
 
 /// 判定前台窗口是否完整覆盖其所在显示器（副屏全屏同样触发；悬浮窗固定主屏显示）。
-/// 排除规则：带 WS_MAXIMIZE 的窗口（任务栏自动隐藏时最大化同样覆盖全屏，属误报）。
+/// 排除规则：① 桌面窗口（点击桌面空白处 / Win+D 后成为前台，见 is_desktop_window）；
+/// ② 带 WS_MAXIMIZE 的窗口（任务栏自动隐藏时最大化同样覆盖全屏，属误报）。
 fn is_fullscreen() -> bool {
     unsafe {
         let fg = GetForegroundWindow();
@@ -61,8 +63,12 @@ fn is_fullscreen() -> bool {
             return false;
         }
         let root = GetAncestor(fg, GA_ROOT);
+        // 误报过滤①：桌面窗口铺满屏幕但不是全屏应用，须最先排除
+        if is_desktop_window(root) {
+            return false;
+        }
         let style = GetWindowLongPtrW(root, GWL_STYLE);
-        // 误报过滤：任务栏自动隐藏时，"带边框的最大化"窗口同样覆盖全屏，须排除。
+        // 误报过滤②：任务栏自动隐藏时，"带边框的最大化"窗口同样覆盖全屏，须排除。
         // 但浏览器 F11 全屏等"无边框最大化"（不带 WS_CAPTION/WS_THICKFRAME）是真实全屏，放行。
         if style & (WS_MAXIMIZE.0 as isize) != 0 && style & ((WS_CAPTION | WS_THICKFRAME).0 as isize) != 0 {
             return false;
@@ -83,4 +89,20 @@ fn is_fullscreen() -> bool {
             && rect.right >= m.right - TOL
             && rect.bottom >= m.bottom - TOL
     }
+}
+
+/// 判定窗口是否为桌面本体（类名 Progman）或壁纸宿主（WorkerW）。
+/// 点击桌面空白处 / Win+D 后前台即桌面窗口，矩形天然铺满屏幕，属全屏误报；
+/// 壁纸引擎等场景前台还可能是 WorkerW 而非 Progman，故按类名统一排除。
+fn is_desktop_window(hwnd: HWND) -> bool {
+    const CLASS_NAME_CAP: usize = 256; // 类名缓冲容量：Win32 类名文档上限 256 字符
+    let mut name = [0u16; CLASS_NAME_CAP];
+    // GetClassNameW 失败返回 0：按非桌面处理，交由几何判定兜底
+    let len = unsafe { GetClassNameW(hwnd, &mut name) };
+    if len <= 0 {
+        return false;
+    }
+    let name = &name[..len as usize];
+    // w! 字面量自带结尾 null，满足 as_wide 读取到终止符的前置条件
+    unsafe { name == w!("Progman").as_wide() || name == w!("WorkerW").as_wide() }
 }

@@ -16,6 +16,7 @@ public class FsWin {
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern IntPtr GetShellWindow();
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr CreateWindowEx(int ex, string cls, string name, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
@@ -36,6 +37,12 @@ public class FsWin {
         return hwnd;
     }
     public static void DestroyWindow2() { if (hwnd != IntPtr.Zero) DestroyWindow(hwnd); }
+    public static void FocusWindow(IntPtr h) {
+        // 模拟 ALT 键使本进程获得前台资格，再 SetForegroundWindow（解除前台锁限制）
+        keybd_event(0x12, 0, 0, UIntPtr.Zero);
+        keybd_event(0x12, 0, 2, UIntPtr.Zero);
+        SetForegroundWindow(h);
+    }
 }
 "@
 
@@ -95,6 +102,27 @@ if ($fh2 -eq $null) {
 }
 Write-Host "日志（期望 fullscreen exited + floater hidden）:"
 Get-Content $log | Select-Object -Last 3 | ForEach-Object { Write-Host "  $_" }
+
+# 3.5 桌面排除验证：桌面成为前台（等价点击桌面空白处 / Win+D），不应触发全屏
+Write-Host "`n=== 桌面前台验证（期望：悬浮窗不出现、无新日志）==="
+$before = (Get-Content $log).Count
+$prevFg = [FsWin]::GetForegroundWindow()
+[FsWin]::FocusWindow([FsWin]::GetShellWindow()) | Out-Null
+Start-Sleep -Milliseconds 500
+$desk = [FsWin]::GetShellWindow()
+$fgNow = [FsWin]::GetForegroundWindow()
+Write-Host "前台窗口: $fgNow  桌面窗口: $desk  一致: $($fgNow -eq $desk)"
+Start-Sleep -Seconds 5  # 轮询1s + 防抖1.5s + 余量
+$fh3 = Get-FloaterWindow
+if ($fh3 -eq $null) {
+    Write-Host "悬浮窗未创建（桌面未触发全屏）"
+} else {
+    Write-Host "!! 桌面误触发全屏，悬浮窗可见: $([FsWin]::IsWindowVisible($fh3))"
+}
+$after = (Get-Content $log).Count
+Write-Host "日志新增: $($after - $before) 行（期望 0）"
+# 还原前台焦点
+[FsWin]::FocusWindow($prevFg) | Out-Null
 
 # 4. 清理
 Stop-Process -Name timestick -Force -ErrorAction SilentlyContinue
