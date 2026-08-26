@@ -23,6 +23,7 @@ mod icon;
 mod log;
 mod position;
 mod render;
+mod settings;
 mod tray;
 
 use std::mem::size_of;
@@ -66,7 +67,9 @@ impl App {
         // 内嵌图标：窗口类 hIcon/hIconSm 与悬浮窗类共用；加载失败保持默认
         let hicon = icon::load(icon::LARGE).unwrap_or_default();
         let hicon_sm = icon::load(icon::SMALL).unwrap_or_default();
-        let floater = floater::Floater::new(hinst, hicon, hicon_sm);
+        let mut floater = floater::Floater::new(hinst, hicon, hicon_sm);
+        // 恢复上次时间格式（窗口未建，set 只改字段，恒成功）
+        let _ = floater.set_show_seconds(settings::load().unwrap_or(false));
 
         // 隐藏主窗口：承载托盘回调、全局热键与全屏消息
         let class = w!("TimeStickMain");
@@ -122,7 +125,7 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         let app = &mut *app_ptr;
         match msg {
             WM_APP_TRAY => {
-                app.tray.on_message(lparam);
+                app.tray.on_message(lparam, app.floater.show_seconds());
                 LRESULT(0)
             }
             WM_COMMAND => {
@@ -135,6 +138,17 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                     about::show(&mut app.about_hwnd, app.main_hwnd);
                 } else if id == tray::TRAY_CMD_EXIT {
                     app.request_exit();
+                } else if id == tray::TRAY_CMD_FORMAT_HM {
+                    Log::log("tray: format HH:MM");
+                    // 重建失败时本次切换未生效，不持久化，避免重启后恢复未生效的格式
+                    if app.floater.set_show_seconds(false) {
+                        settings::save(false);
+                    }
+                } else if id == tray::TRAY_CMD_FORMAT_HMS {
+                    Log::log("tray: format HH:MM:SS");
+                    if app.floater.set_show_seconds(true) {
+                        settings::save(true);
+                    }
                 }
                 LRESULT(0)
             }

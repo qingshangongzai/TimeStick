@@ -26,7 +26,7 @@ use windows::core::{w, PCWSTR, Result};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetDC, GetMonitorInfoW, GetPixel, MonitorFromWindow, ReleaseDC, HBRUSH, MONITORINFO,
-    MONITOR_DEFAULTTOPRIMARY,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Controls::{HOVER_DEFAULT, WM_MOUSELEAVE};
@@ -39,10 +39,11 @@ use crate::log::Log;
 use crate::position;
 use crate::render::Renderer;
 
-const ID_TIMER: usize = 1; // 时间刷新（1000ms）
+const ID_TIMER: usize = 1; // 时间刷新（每次触发后按距下次显示变化的毫秒数重排）
 const ID_HOVER: usize = 2; // 固定模式悬停检测（250ms）
 const HOVER_TICK_MS: u32 = 250;
 const HOVER_UNPIN_MS: u32 = 1500; // 悬停超过 1.5s 自动解除固定
+const TIMER_MIN_MS: u32 = 50; // 时间刷新定时器重排下限：防 0 值忙等
 const MARGIN: i32 = 24; // 默认位置距屏幕边缘边距
 
 /// 悬浮窗组件。
@@ -59,6 +60,8 @@ pub struct Floater {
     hovering: bool,
     hover_ms: u32,
     visible: bool,
+    /// 显示秒（HH:MM:SS）；false 为 HH:MM。勾选状态唯一真源，托盘菜单每次弹出时读取
+    show_seconds: bool,
     /// 当前窗口左上角位置（会话内记忆，拖动后更新）
     pos: Option<POINT>,
     dragging: bool,
@@ -78,6 +81,7 @@ impl Floater {
             hovering: false,
             hover_ms: 0,
             visible: false,
+            show_seconds: false,
             pos: None,
             dragging: false,
             drag_start: POINT::default(),
@@ -88,6 +92,56 @@ impl Floater {
     /// 取出窗口句柄（退出清理用）。
     pub fn take_hwnd(&mut self) -> Option<HWND> {
         self.hwnd.take()
+    }
+
+    /// 当前是否显示秒（供托盘菜单勾选状态；真源唯一，Tray 不存副本）。
+    pub fn show_seconds(&self) -> bool {
+        self.show_seconds
+    }
+
+    /// 切换时间格式（HH:MM ↔ HH:MM:SS）。
+    /// 窗口可见时重建渲染器（尺寸创建时定死）并按新尺寸调整窗口，右缘夹取；
+    /// 重建失败则保持原渲染器与格式。窗口不可见时只改字段，下次 show() 按新格式建。
+    /// 返回是否成功生效——失败时调用方不应持久化该选择（避免重启后恢复未生效的格式）。
+    pub fn set_show_seconds(&mut self, show_seconds: bool) -> bool {
+        if self.show_seconds == show_seconds {
+            return true;
+        }
+        let Some(hwnd) = self.hwnd else {
+            self.show_seconds = show_seconds;
+            return true;
+        };
+        // hwnd 与 renderer 同生共死（ensure_created / hide），此处必为 Some；先 take 以便失败时放回
+        let old = self.renderer.take();
+        match Renderer::new(show_seconds) {
+            Ok(renderer) => {
+                self.show_seconds = show_seconds;
+                let (w, h) = renderer.size;
+                self.renderer = Some(renderer);
+                // 新宽超出当前屏右缘则左移夹取；GetMonitorInfoW 失败跳过夹取仅改尺寸（降级，窗口可拖回）
+                let mut pos = self.pos.unwrap_or(POINT { x: 0, y: 0 });
+                unsafe {
+                    let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                    let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+                    if GetMonitorInfoW(mon, &mut mi).as_bool() && pos.x + w > mi.rcMonitor.right {
+                        pos.x = mi.rcMonitor.right - w;
+                    }
+                }
+                self.pos = Some(pos);
+                unsafe {
+                    let _ = SetWindowPos(hwnd, None, pos.x, pos.y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+                self.render_now(hwnd);
+                // 按新格式对齐刷新定时器：切换即刻起秒模式 1s 内、分模式对齐下一整分
+                unsafe { SetTimer(Some(hwnd), ID_TIMER, self.timer_ms_to_next(), None); }
+                true
+            }
+            Err(e) => {
+                self.renderer = old;
+                Log::log(&format!("renderer recreate failed, keep previous format: {e}"));
+                false
+            }
+        }
     }
 
     /// 首次显示时创建窗口与渲染器（延迟加载 D2D/DWrite，静默驻留内存最小化）。
@@ -113,7 +167,7 @@ impl Floater {
         };
         unsafe { let _ = RegisterClassExW(&wc); }
 
-        let renderer = Renderer::new()?;
+        let renderer = Renderer::new(self.show_seconds)?;
         let (w, h) = renderer.size;
         // WS_EX_NOACTIVATE：点击时钟不抢游戏焦点（全屏检测不受干扰）
         let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
@@ -329,11 +383,23 @@ impl Floater {
 
     fn render_now(&self, hwnd: HWND) {
         let Some(renderer) = &self.renderer else { return };
-        let t = now_hhmm();
+        let t = if self.show_seconds { now_hms() } else { now_hhmm() };
         let dark_bg = self.background_is_dark(hwnd);
         renderer.render(&t, self.pinned, self.hovering, dark_bg);
         let pos = self.pos.unwrap_or(POINT { x: 0, y: 0 });
         renderer.present(hwnd, pos);
+    }
+
+    /// ID_TIMER 距下一次触发的毫秒数：对齐到下一次时间显示变化
+    /// （秒模式 → 下一整秒；分模式 → 下一整分）。TIMER_MIN_MS 下限防 0 值忙等。
+    fn timer_ms_to_next(&self) -> u32 {
+        let st = unsafe { GetLocalTime() };
+        let ms = if self.show_seconds {
+            1000 - st.wMilliseconds as u32
+        } else {
+            (60 - st.wSecond as u32) * 1000 - st.wMilliseconds as u32
+        };
+        ms.max(TIMER_MIN_MS)
     }
 
     /// 采样悬浮窗上方背景的亮度，决定配色（浅色背景 → 黑色文字 + 白底）。
@@ -448,6 +514,11 @@ fn now_hhmm() -> String {
     format!("{:02}:{:02}", st.wHour, st.wMinute)
 }
 
+fn now_hms() -> String {
+    let st = unsafe { GetLocalTime() };
+    format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond)
+}
+
 unsafe extern "system" fn floater_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         let this = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Floater;
@@ -482,6 +553,9 @@ unsafe extern "system" fn floater_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, 
                     floater.on_hover_tick();
                 } else if let Some(hwnd) = floater.hwnd {
                     floater.render_now(hwnd);
+                    // 按距下一次显示变化的毫秒数重排定时器（wMilliseconds/wSecond 实时读取），
+                    // 秒跳变与真实秒对齐；分模式顺势降至 1 次/分
+                    SetTimer(Some(hwnd), ID_TIMER, floater.timer_ms_to_next(), None);
                 }
                 LRESULT(0)
             }

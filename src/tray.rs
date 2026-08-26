@@ -29,8 +29,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
-    ICONINFO, MF_STRING, MENU_ITEM_FLAGS, PostMessageW, SetForegroundWindow, TPM_RIGHTBUTTON,
-    TrackPopupMenu, HICON, WM_NULL, WM_RBUTTONUP,
+    ICONINFO, MF_CHECKED, MF_POPUP, MF_STRING, MENU_ITEM_FLAGS, PostMessageW, SetForegroundWindow,
+    TPM_RIGHTBUTTON, TrackPopupMenu, HICON, WM_NULL, WM_RBUTTONUP,
 };
 
 use crate::icon;
@@ -39,6 +39,8 @@ use crate::log::Log;
 pub const TRAY_CMD_SHOW: usize = 1000; // 显示悬浮窗
 pub const TRAY_CMD_EXIT: usize = 1001; // 直接退出
 pub const TRAY_CMD_ABOUT: usize = 1002; // 关于对话框
+pub const TRAY_CMD_FORMAT_HM: usize = 1003; // 时间格式：HH:MM
+pub const TRAY_CMD_FORMAT_HMS: usize = 1004; // 时间格式：HH:MM:SS
 const TRAY_ID: u32 = 1;
 
 pub struct Tray {
@@ -83,18 +85,31 @@ impl Tray {
     }
 
     /// 处理托盘回调消息（uCallbackMessage = WM_APP_TRAY，lparam 为鼠标消息）。
-    pub fn on_message(&self, lparam: LPARAM) {
+    /// show_seconds 由调用方（main.rs）从 Floater 传入当前值——勾选状态真源唯一。
+    pub fn on_message(&self, lparam: LPARAM, show_seconds: bool) {
         if (lparam.0 as u32) == WM_RBUTTONUP {
-            self.show_menu();
+            self.show_menu(show_seconds);
         }
     }
 
-    fn show_menu(&self) {
+    fn show_menu(&self, show_seconds: bool) {
         unsafe {
             // 菜单正常关闭需要窗口处于前台
             let _ = SetForegroundWindow(self.hwnd);
             let Ok(menu) = CreatePopupMenu() else { return };
+            // 「时间格式」子菜单创建失败则整体放弃（避免主菜单半成品泄漏）
+            let Ok(submenu) = CreatePopupMenu() else {
+                let _ = DestroyMenu(menu);
+                return;
+            };
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_SHOW, w!("显示悬浮窗"));
+            // 单选组：当前格式项勾选。MF_RADIO 与 MF_BYPOSITION 同值（0x400），crate 未导出
+            // 且该位会被按位置解释，故用 MF_CHECKED 标记当前项
+            let checked = MENU_ITEM_FLAGS(MF_CHECKED.0);
+            let unchecked = MENU_ITEM_FLAGS(MF_STRING.0); // MF_STRING == MF_UNCHECKED
+            let _ = AppendMenuW(submenu, if show_seconds { unchecked } else { checked }, TRAY_CMD_FORMAT_HM, w!("HH:MM"));
+            let _ = AppendMenuW(submenu, if show_seconds { checked } else { unchecked }, TRAY_CMD_FORMAT_HMS, w!("HH:MM:SS"));
+            let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_POPUP.0), submenu.0 as usize, w!("时间格式"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_ABOUT, w!("关于"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_EXIT, w!("直接退出"));
             let mut pt = POINT::default();
@@ -104,6 +119,7 @@ impl Tray {
             // 补发空消息完成前台切换（KB135788 标准套路），否则下次右键托盘可能需点两次
             let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(menu);
+            let _ = DestroyMenu(submenu);
         }
     }
 

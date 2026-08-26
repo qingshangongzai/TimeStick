@@ -87,11 +87,11 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new() -> Result<Self> {
+    pub fn new(show_seconds: bool) -> Result<Self> {
         let factory = unsafe { D2D1CreateFactory::<ID2D1Factory>(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
         let dwrite = unsafe { DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED)? };
 
-        // 时间格式固定为 HH:MM，文本尺寸恒定，窗口大小一次算好
+        // 时间格式按显示需求取 probe（HH:MM 或 HH:MM:SS），文本尺寸一次算定，窗口大小随之确定
         let text_format = unsafe {
             dwrite.CreateTextFormat(
                 w!("Segoe UI"),
@@ -103,7 +103,7 @@ impl Renderer {
                 w!(""),
             )?
         };
-        let probe: Vec<u16> = "00:00".encode_utf16().collect();
+        let probe: Vec<u16> = if show_seconds { "00:00:00" } else { "00:00" }.encode_utf16().collect();
         let layout = unsafe { dwrite.CreateTextLayout(&probe, &text_format, 10000.0, 10000.0)? };
         let mut metrics = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut metrics)?; }
