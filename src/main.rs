@@ -68,8 +68,10 @@ impl App {
         let hicon = icon::load(icon::LARGE).unwrap_or_default();
         let hicon_sm = icon::load(icon::SMALL).unwrap_or_default();
         let mut floater = floater::Floater::new(hinst, hicon, hicon_sm);
-        // 恢复上次时间格式（窗口未建，set 只改字段，恒成功）
-        let _ = floater.set_show_seconds(settings::load().unwrap_or(false));
+        // 恢复上次偏好（窗口未建，set 只改字段，恒成功）
+        let pref = settings::load();
+        let _ = floater.set_show_seconds(pref.show_seconds);
+        let _ = floater.set_seven_seg(pref.seven_seg);
 
         // 隐藏主窗口：承载托盘回调、全局热键与全屏消息
         let class = w!("TimeStickMain");
@@ -125,7 +127,7 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         let app = &mut *app_ptr;
         match msg {
             WM_APP_TRAY => {
-                app.tray.on_message(lparam, app.floater.show_seconds());
+                app.tray.on_message(lparam, app.floater.show_seconds(), app.floater.seven_seg());
                 LRESULT(0)
             }
             WM_COMMAND => {
@@ -142,12 +144,22 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                     Log::log("tray: format HH:MM");
                     // 重建失败时本次切换未生效，不持久化，避免重启后恢复未生效的格式
                     if app.floater.set_show_seconds(false) {
-                        settings::save(false);
+                        settings::save(&settings::Settings { show_seconds: false, seven_seg: app.floater.seven_seg() });
                     }
                 } else if id == tray::TRAY_CMD_FORMAT_HMS {
                     Log::log("tray: format HH:MM:SS");
                     if app.floater.set_show_seconds(true) {
-                        settings::save(true);
+                        settings::save(&settings::Settings { show_seconds: true, seven_seg: app.floater.seven_seg() });
+                    }
+                } else if id == tray::TRAY_CMD_STYLE_DEFAULT {
+                    Log::log("tray: style default font");
+                    if app.floater.set_seven_seg(false) {
+                        settings::save(&settings::Settings { show_seconds: app.floater.show_seconds(), seven_seg: false });
+                    }
+                } else if id == tray::TRAY_CMD_STYLE_SEG {
+                    Log::log("tray: style seven-seg");
+                    if app.floater.set_seven_seg(true) {
+                        settings::save(&settings::Settings { show_seconds: app.floater.show_seconds(), seven_seg: true });
                     }
                 }
                 LRESULT(0)
