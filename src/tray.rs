@@ -41,6 +41,8 @@ pub const TRAY_CMD_EXIT: usize = 1001; // 直接退出
 pub const TRAY_CMD_ABOUT: usize = 1002; // 关于对话框
 pub const TRAY_CMD_FORMAT_HM: usize = 1003; // 时间格式：HH:MM
 pub const TRAY_CMD_FORMAT_HMS: usize = 1004; // 时间格式：HH:MM:SS
+pub const TRAY_CMD_STYLE_DEFAULT: usize = 1005; // 显示风格：默认字体
+pub const TRAY_CMD_STYLE_SEG: usize = 1006; // 显示风格：七段数码管
 const TRAY_ID: u32 = 1;
 
 pub struct Tray {
@@ -85,14 +87,14 @@ impl Tray {
     }
 
     /// 处理托盘回调消息（uCallbackMessage = WM_APP_TRAY，lparam 为鼠标消息）。
-    /// show_seconds 由调用方（main.rs）从 Floater 传入当前值——勾选状态真源唯一。
-    pub fn on_message(&self, lparam: LPARAM, show_seconds: bool) {
+    /// show_seconds / seven_seg 由调用方（main.rs）从 Floater 传入当前值——勾选状态真源唯一。
+    pub fn on_message(&self, lparam: LPARAM, show_seconds: bool, seven_seg: bool) {
         if (lparam.0 as u32) == WM_RBUTTONUP {
-            self.show_menu(show_seconds);
+            self.show_menu(show_seconds, seven_seg);
         }
     }
 
-    fn show_menu(&self, show_seconds: bool) {
+    fn show_menu(&self, show_seconds: bool, seven_seg: bool) {
         unsafe {
             // 菜单正常关闭需要窗口处于前台
             let _ = SetForegroundWindow(self.hwnd);
@@ -102,14 +104,23 @@ impl Tray {
                 let _ = DestroyMenu(menu);
                 return;
             };
+            // 「显示风格」子菜单创建失败同样整体放弃（此时 submenu 已建，一并清理）
+            let Ok(style_menu) = CreatePopupMenu() else {
+                let _ = DestroyMenu(menu);
+                let _ = DestroyMenu(submenu);
+                return;
+            };
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_SHOW, w!("显示悬浮窗"));
-            // 单选组：当前格式项勾选。MF_RADIO 与 MF_BYPOSITION 同值（0x400），crate 未导出
+            // 单选组：当前项勾选。MF_RADIO 与 MF_BYPOSITION 同值（0x400），crate 未导出
             // 且该位会被按位置解释，故用 MF_CHECKED 标记当前项
             let checked = MENU_ITEM_FLAGS(MF_CHECKED.0);
             let unchecked = MENU_ITEM_FLAGS(MF_STRING.0); // MF_STRING == MF_UNCHECKED
             let _ = AppendMenuW(submenu, if show_seconds { unchecked } else { checked }, TRAY_CMD_FORMAT_HM, w!("HH:MM"));
             let _ = AppendMenuW(submenu, if show_seconds { checked } else { unchecked }, TRAY_CMD_FORMAT_HMS, w!("HH:MM:SS"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_POPUP.0), submenu.0 as usize, w!("时间格式"));
+            let _ = AppendMenuW(style_menu, if seven_seg { unchecked } else { checked }, TRAY_CMD_STYLE_DEFAULT, w!("默认字体"));
+            let _ = AppendMenuW(style_menu, if seven_seg { checked } else { unchecked }, TRAY_CMD_STYLE_SEG, w!("七段数码管"));
+            let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_POPUP.0), style_menu.0 as usize, w!("显示风格"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_ABOUT, w!("关于"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_EXIT, w!("直接退出"));
             let mut pt = POINT::default();
@@ -120,6 +131,7 @@ impl Tray {
             let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(menu);
             let _ = DestroyMenu(submenu);
+            let _ = DestroyMenu(style_menu);
         }
     }
 

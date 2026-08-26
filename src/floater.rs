@@ -62,6 +62,8 @@ pub struct Floater {
     visible: bool,
     /// 显示秒（HH:MM:SS）；false 为 HH:MM。勾选状态唯一真源，托盘菜单每次弹出时读取
     show_seconds: bool,
+    /// 七段数码管显示风格；false 为默认字体。勾选状态唯一真源，托盘菜单每次弹出时读取
+    seven_seg: bool,
     /// 当前窗口左上角位置（会话内记忆，拖动后更新）
     pos: Option<POINT>,
     dragging: bool,
@@ -82,6 +84,7 @@ impl Floater {
             hover_ms: 0,
             visible: false,
             show_seconds: false,
+            seven_seg: false,
             pos: None,
             dragging: false,
             drag_start: POINT::default(),
@@ -99,6 +102,11 @@ impl Floater {
         self.show_seconds
     }
 
+    /// 当前是否七段数码管风格（供托盘菜单勾选状态；真源唯一，Tray 不存副本）。
+    pub fn seven_seg(&self) -> bool {
+        self.seven_seg
+    }
+
     /// 切换时间格式（HH:MM ↔ HH:MM:SS）。
     /// 窗口可见时重建渲染器（尺寸创建时定死）并按新尺寸调整窗口，右缘夹取；
     /// 重建失败则保持原渲染器与格式。窗口不可见时只改字段，下次 show() 按新格式建。
@@ -107,15 +115,39 @@ impl Floater {
         if self.show_seconds == show_seconds {
             return true;
         }
-        let Some(hwnd) = self.hwnd else {
-            self.show_seconds = show_seconds;
+        self.show_seconds = show_seconds;
+        if !self.recreate() {
+            // 重建失败：还原字段，保持「字段与渲染器一致」的不变式
+            self.show_seconds = !show_seconds;
+            false
+        } else {
+            true
+        }
+    }
+
+    /// 切换显示风格（默认字体 ↔ 七段数码管）：语义同 set_show_seconds。
+    pub fn set_seven_seg(&mut self, seven_seg: bool) -> bool {
+        if self.seven_seg == seven_seg {
             return true;
-        };
+        }
+        self.seven_seg = seven_seg;
+        if !self.recreate() {
+            self.seven_seg = !seven_seg;
+            false
+        } else {
+            true
+        }
+    }
+
+    /// 按当前 show_seconds/seven_seg 重建渲染器并适配窗口（两个 setter 共用）。
+    /// 窗口不可见返回 true（下次 show() 的 ensure_created 按新字段建）；
+    /// 重建失败恢复旧渲染器并返回 false（调用方回滚字段）。
+    fn recreate(&mut self) -> bool {
+        let Some(hwnd) = self.hwnd else { return true };
         // hwnd 与 renderer 同生共死（ensure_created / hide），此处必为 Some；先 take 以便失败时放回
         let old = self.renderer.take();
-        match Renderer::new(show_seconds) {
+        match Renderer::new(self.show_seconds, self.seven_seg) {
             Ok(renderer) => {
-                self.show_seconds = show_seconds;
                 let (w, h) = renderer.size;
                 self.renderer = Some(renderer);
                 // 新宽超出当前屏右缘则左移夹取；GetMonitorInfoW 失败跳过夹取仅改尺寸（降级，窗口可拖回）
@@ -138,7 +170,7 @@ impl Floater {
             }
             Err(e) => {
                 self.renderer = old;
-                Log::log(&format!("renderer recreate failed, keep previous format: {e}"));
+                Log::log(&format!("renderer recreate failed, keep previous style: {e}"));
                 false
             }
         }
@@ -167,7 +199,7 @@ impl Floater {
         };
         unsafe { let _ = RegisterClassExW(&wc); }
 
-        let renderer = Renderer::new(self.show_seconds)?;
+        let renderer = Renderer::new(self.show_seconds, self.seven_seg)?;
         let (w, h) = renderer.size;
         // WS_EX_NOACTIVATE：点击时钟不抢游戏焦点（全屏检测不受干扰）
         let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;

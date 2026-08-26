@@ -54,6 +54,15 @@ const CORNER_RADIUS: f32 = 8.0;
 // 背景透明度：普通 25%，固定模式悬停提示 40%
 const BG_ALPHA: f32 = 0.25;
 const BG_ALPHA_HOVER: f32 = 0.40;
+// 七段数码管几何（物理像素）：段厚、数字单元、冒号单元、单元间距。
+// 数值取向：与 18px 默认字体的视觉占比相当（整体面积小、字重细）
+const SEG_T: f32 = 2.0;
+const DIGIT_W: f32 = 10.0;
+const DIGIT_H: f32 = 18.0;
+const COLON_W: f32 = 5.0;
+const DIGIT_GAP: f32 = 1.5;
+const COLON_DOT_R: f32 = 1.8;
+const COLON_DOT_GAP: f32 = 5.0; // 两圆点之间的边缘间距（绘制处以 2 分置于中线两侧）
 
 /// 每像素 Alpha 渲染器：D2D 绘制 → DIB 内存 DC → UpdateLayeredWindow。
 pub struct Renderer {
@@ -80,6 +89,8 @@ pub struct Renderer {
     text_h: f32,
     /// 单行文本宽度（未悬停水平居中用）
     text_w: f32,
+    /// 七段数码管风格（true 时时间以七段管绘制，尺寸按几何计算）
+    seven_seg: bool,
     /// 图钉按钮热区（客户区坐标）
     pub btn_pin: RECT,
     /// 关闭按钮热区（客户区坐标）
@@ -87,7 +98,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(show_seconds: bool) -> Result<Self> {
+    pub fn new(show_seconds: bool, seven_seg: bool) -> Result<Self> {
         let factory = unsafe { D2D1CreateFactory::<ID2D1Factory>(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
         let dwrite = unsafe { DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED)? };
 
@@ -103,12 +114,17 @@ impl Renderer {
                 w!(""),
             )?
         };
-        let probe: Vec<u16> = if show_seconds { "00:00:00" } else { "00:00" }.encode_utf16().collect();
-        let layout = unsafe { dwrite.CreateTextLayout(&probe, &text_format, 10000.0, 10000.0)? };
-        let mut metrics = DWRITE_TEXT_METRICS::default();
-        unsafe { layout.GetMetrics(&mut metrics)?; }
-        let text_w = metrics.width.ceil();
-        let text_h = metrics.height.ceil();
+        // 七段管尺寸按几何常量计算（跳过 DWrite 度量）；默认字体走 DWrite 探针
+        let probe = if show_seconds { "00:00:00" } else { "00:00" };
+        let (text_w, text_h) = if seven_seg {
+            (seven_seg_text_width(probe), DIGIT_H)
+        } else {
+            let probe_u16: Vec<u16> = probe.encode_utf16().collect();
+            let layout = unsafe { dwrite.CreateTextLayout(&probe_u16, &text_format, 10000.0, 10000.0)? };
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            unsafe { layout.GetMetrics(&mut metrics)?; }
+            (metrics.width.ceil(), metrics.height.ceil())
+        };
 
         // 单行布局：[时间] [图钉] [关闭]
         let btn = BTN_SIZE;
@@ -182,6 +198,7 @@ impl Renderer {
             size: (w, h),
             text_h,
             text_w,
+            seven_seg,
             btn_pin,
             btn_close,
         })
@@ -220,19 +237,24 @@ impl Renderer {
                 self.rt.FillRoundedRectangle(&rounded, bg);
             }
             // 时间文字（垂直居中；未悬停水平居中，悬停回到左侧给按钮让位）
+            // 七段管风格：段色同样随背景反色（深底白段/浅底黑段）
             let text_brush = if dark_bg { &self.brush_light } else { &self.brush_dark };
-            let tc: Vec<u16> = time.encode_utf16().collect();
             let text_y = ((h as f32 - self.text_h) / 2.0).max(0.0);
             let text_x = if hovering { PAD_X } else { ((w as f32 - self.text_w) / 2.0).max(PAD_X) };
-            let layout = D2D_RECT_F { left: text_x, top: text_y, right: 100000.0, bottom: 100000.0 };
-            self.rt.DrawText(
-                &tc,
-                &self.text_format,
-                &layout,
-                text_brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
+            if self.seven_seg {
+                self.draw_seven_seg(time, text_x, text_y, text_brush);
+            } else {
+                let tc: Vec<u16> = time.encode_utf16().collect();
+                let layout = D2D_RECT_F { left: text_x, top: text_y, right: 100000.0, bottom: 100000.0 };
+                self.rt.DrawText(
+                    &tc,
+                    &self.text_format,
+                    &layout,
+                    text_brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
             // 按钮图形（仅悬停时显示）
             if hovering {
                 if pinned {
@@ -344,6 +366,66 @@ impl Renderer {
         }
     }
 
+    /// 七段管风格：画整串时间（数字 + 冒号），x/y 为文字左上角（与 DrawText 同基准）。
+    fn draw_seven_seg(&self, time: &str, x: f32, y: f32, brush: &ID2D1Brush) {
+        let mut cx = x;
+        for c in time.chars() {
+            if c == ':' {
+                self.draw_seven_seg_colon(cx, y, brush);
+                cx += COLON_W;
+            } else {
+                self.draw_seven_seg_digit(c as u8, cx, y, brush);
+                cx += DIGIT_W;
+            }
+            // 与 seven_seg_text_width 的推进规则一致（尾随间距仅多算 1.5px，无影响）
+            cx += DIGIT_GAP;
+        }
+    }
+
+    /// 画单个数字单元（仅点亮段，其余全透明）。
+    /// 段命名：a 顶部横 / b 右上 / c 右下 / d 底部横 / e 左下 / f 左上 / g 中间横。
+    fn draw_seven_seg_digit(&self, digit: u8, x: f32, y: f32, brush: &ID2D1Brush) {
+        let mask = seg_map(digit);
+        let vlen = (DIGIT_H - SEG_T) / 2.0; // 垂直段半高
+        let mid_y = vlen; // 中横段顶边（中横段垂直居中 ⇒ 恰为半高；调整段位布局时须独立计算）
+        let low_y = (DIGIT_H + SEG_T) / 2.0; // 下垂直段顶边
+        let r = SEG_T / 2.0; // 段圆角半径
+        let seg = |l: f32, t: f32, rw: f32, rh: f32| D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: x + l, top: y + t, right: x + l + rw, bottom: y + t + rh },
+            radiusX: r,
+            radiusY: r,
+        };
+        unsafe {
+            if mask & SEG_A != 0 { self.rt.FillRoundedRectangle(&seg(0.0, 0.0, DIGIT_W, SEG_T), brush); }
+            if mask & SEG_B != 0 { self.rt.FillRoundedRectangle(&seg(DIGIT_W - SEG_T, 0.0, SEG_T, vlen), brush); }
+            if mask & SEG_C != 0 { self.rt.FillRoundedRectangle(&seg(DIGIT_W - SEG_T, low_y, SEG_T, vlen), brush); }
+            if mask & SEG_D != 0 { self.rt.FillRoundedRectangle(&seg(0.0, DIGIT_H - SEG_T, DIGIT_W, SEG_T), brush); }
+            if mask & SEG_E != 0 { self.rt.FillRoundedRectangle(&seg(0.0, low_y, SEG_T, vlen), brush); }
+            if mask & SEG_F != 0 { self.rt.FillRoundedRectangle(&seg(0.0, 0.0, SEG_T, vlen), brush); }
+            if mask & SEG_G != 0 { self.rt.FillRoundedRectangle(&seg(0.0, mid_y, DIGIT_W, SEG_T), brush); }
+        }
+    }
+
+    /// 画冒号：两个圆点，垂直居中分布。
+    fn draw_seven_seg_colon(&self, x: f32, y: f32, brush: &ID2D1Brush) {
+        let cx = x + COLON_W / 2.0;
+        let cy = y + DIGIT_H / 2.0;
+        unsafe {
+            let top = D2D1_ELLIPSE {
+                point: Vector2 { X: cx, Y: cy - COLON_DOT_R - COLON_DOT_GAP / 2.0 },
+                radiusX: COLON_DOT_R,
+                radiusY: COLON_DOT_R,
+            };
+            let bottom = D2D1_ELLIPSE {
+                point: Vector2 { X: cx, Y: cy + COLON_DOT_R + COLON_DOT_GAP / 2.0 },
+                radiusX: COLON_DOT_R,
+                radiusY: COLON_DOT_R,
+            };
+            self.rt.FillEllipse(&top, brush);
+            self.rt.FillEllipse(&bottom, brush);
+        }
+    }
+
     fn btn_center(&self, r: &RECT) -> (f32, f32) {
         (((r.left + r.right) as f32) / 2.0, ((r.top + r.bottom) as f32) / 2.0)
     }
@@ -390,5 +472,71 @@ impl Drop for Renderer {
             let _ = DeleteObject(HGDIOBJ(self.dib.0));
             let _ = DeleteDC(self.hdc);
         }
+    }
+}
+
+// 段码位掩码：bit0=a 顶部横 … bit6=g 中间横（段命名见 draw_seven_seg_digit）
+const SEG_A: u8 = 1 << 0;
+const SEG_B: u8 = 1 << 1;
+const SEG_C: u8 = 1 << 2;
+const SEG_D: u8 = 1 << 3;
+const SEG_E: u8 = 1 << 4;
+const SEG_F: u8 = 1 << 5;
+const SEG_G: u8 = 1 << 6;
+
+/// 数字 0-9 的点亮段位掩码；其他字符返回全灭（防御，不 panic）。
+fn seg_map(digit: u8) -> u8 {
+    match digit {
+        b'0' => SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F,
+        b'1' => SEG_B | SEG_C,
+        b'2' => SEG_A | SEG_B | SEG_G | SEG_E | SEG_D,
+        b'3' => SEG_A | SEG_B | SEG_G | SEG_C | SEG_D,
+        b'4' => SEG_F | SEG_G | SEG_B | SEG_C,
+        b'5' => SEG_A | SEG_F | SEG_G | SEG_C | SEG_D,
+        b'6' => SEG_A | SEG_F | SEG_G | SEG_E | SEG_C | SEG_D,
+        b'7' => SEG_A | SEG_B | SEG_C,
+        b'8' => SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G,
+        b'9' => SEG_A | SEG_B | SEG_C | SEG_D | SEG_F | SEG_G,
+        _ => 0,
+    }
+}
+
+/// 七段管文本宽度：数字单元 × 数字数 + 冒号单元 × 冒号数 + 间距 × 字符数。
+/// 推进规则与 draw_seven_seg 一致。
+fn seven_seg_text_width(text: &str) -> f32 {
+    let mut w = 0.0;
+    for c in text.chars() {
+        w += if c == ':' { COLON_W } else { DIGIT_W };
+        w += DIGIT_GAP;
+    }
+    w
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seg_map_covers_digits() {
+        assert_eq!(seg_map(b'0'), SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F);
+        assert_eq!(seg_map(b'1'), SEG_B | SEG_C);
+        assert_eq!(seg_map(b'5'), SEG_A | SEG_F | SEG_G | SEG_C | SEG_D);
+        assert_eq!(seg_map(b'8'), SEG_A | SEG_B | SEG_C | SEG_D | SEG_E | SEG_F | SEG_G);
+        assert_eq!(seg_map(b'9'), SEG_A | SEG_B | SEG_C | SEG_D | SEG_F | SEG_G);
+    }
+
+    #[test]
+    fn seg_map_unknown_is_all_off() {
+        assert_eq!(seg_map(b'x'), 0);
+    }
+
+    #[test]
+    fn seven_seg_text_width_matches_geometry() {
+        // "00:00" = 4 数字 + 1 冒号 + 5 间距
+        assert_eq!(seven_seg_text_width("00:00"), 4.0 * DIGIT_W + COLON_W + 5.0 * DIGIT_GAP);
+        // "00:00:00" = 6 数字 + 2 冒号 + 8 间距
+        assert_eq!(seven_seg_text_width("00:00:00"), 6.0 * DIGIT_W + 2.0 * COLON_W + 8.0 * DIGIT_GAP);
+        // 单字符：单元宽 + 尾随间距
+        assert_eq!(seven_seg_text_width("5"), DIGIT_W + DIGIT_GAP);
     }
 }
