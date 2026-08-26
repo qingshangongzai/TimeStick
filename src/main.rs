@@ -32,8 +32,9 @@ use windows::core::{w, PCWSTR, Result};
 use windows::Win32::Foundation::{GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM, ERROR_ALREADY_EXISTS};
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows::Win32::UI::Input::Ime::ImmDisableIME;
 use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, RegisterHotKey, UnregisterHotKey};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -175,6 +176,12 @@ fn main() -> Result<()> {
     unsafe {
         // DPI 感知必须在创建任何窗口之前声明，保证多倍率缩放下文字清晰、矩形比较准确
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // 禁用主线程 IMM 输入法：本进程无任何文本输入需求，防止隐藏主窗口被托盘菜单
+        // 激活到前台时，系统把当前键盘布局的输入法（如搜狗，含 TSF 配套）加载进进程。
+        // DLL 一经加载永不卸载，曾实测 +33MB 永久驻留；ImmDisableIME 线程级生效、
+        // 不影响其他进程与 detect 后台线程，须在任何窗口创建前调用。
+        // （实测：仅禁 TSF 无效；仅此一项即可阻止整条加载链，见 内存优化方案.md）
+        let _ = ImmDisableIME(GetCurrentThreadId());
         // 单实例保护：已有实例运行则静默退出
         let _mutex = CreateMutexW(None, false, SINGLE_INSTANCE_MUTEX)?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
