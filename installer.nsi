@@ -95,5 +95,8 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_ZH}.lnk"
   RMDir  "$SMPROGRAMS\${PRODUCT_NAME}"
 
+  ; 清理用户开机自启动项（用户曾开启过时对称移除；值不存在时静默跳过）
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "TimeStick"
+
   DeleteRegKey HKLM "${UNINST_KEY}"
 SectionEnd

@@ -43,6 +43,7 @@ pub const TRAY_CMD_FORMAT_HM: usize = 1003; // 时间格式：HH:MM
 pub const TRAY_CMD_FORMAT_HMS: usize = 1004; // 时间格式：HH:MM:SS
 pub const TRAY_CMD_STYLE_DEFAULT: usize = 1005; // 显示风格：默认字体
 pub const TRAY_CMD_STYLE_SEG: usize = 1006; // 显示风格：七段数码管
+pub const TRAY_CMD_AUTO_START: usize = 1007; // 开机自启动（勾选）
 const TRAY_ID: u32 = 1;
 
 pub struct Tray {
@@ -87,14 +88,15 @@ impl Tray {
     }
 
     /// 处理托盘回调消息（uCallbackMessage = WM_APP_TRAY，lparam 为鼠标消息）。
-    /// show_seconds / seven_seg 由调用方（main.rs）从 Floater 传入当前值——勾选状态真源唯一。
-    pub fn on_message(&self, lparam: LPARAM, show_seconds: bool, seven_seg: bool) {
+    /// show_seconds / seven_seg / auto_start 由调用方（main.rs）从各真源传入当前值
+    /// ——勾选状态真源唯一（自启动的真源是注册表，见 src/autostart.rs）。
+    pub fn on_message(&self, lparam: LPARAM, show_seconds: bool, seven_seg: bool, auto_start: bool) {
         if (lparam.0 as u32) == WM_RBUTTONUP {
-            self.show_menu(show_seconds, seven_seg);
+            self.show_menu(show_seconds, seven_seg, auto_start);
         }
     }
 
-    fn show_menu(&self, show_seconds: bool, seven_seg: bool) {
+    fn show_menu(&self, show_seconds: bool, seven_seg: bool, auto_start: bool) {
         unsafe {
             // 菜单正常关闭需要窗口处于前台
             let _ = SetForegroundWindow(self.hwnd);
@@ -121,6 +123,7 @@ impl Tray {
             let _ = AppendMenuW(style_menu, if seven_seg { unchecked } else { checked }, TRAY_CMD_STYLE_DEFAULT, w!("默认字体"));
             let _ = AppendMenuW(style_menu, if seven_seg { checked } else { unchecked }, TRAY_CMD_STYLE_SEG, w!("七段数码管"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_POPUP.0), style_menu.0 as usize, w!("显示风格"));
+            let _ = AppendMenuW(menu, if auto_start { checked } else { unchecked }, TRAY_CMD_AUTO_START, w!("开机自启动"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_ABOUT, w!("关于"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_EXIT, w!("直接退出"));
             let mut pt = POINT::default();

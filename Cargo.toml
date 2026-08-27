@@ -1,6 +1,6 @@
 [package]
 name = "timestick"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 authors = ["青山公仔"]
 description = "全屏时间悬浮窗 —— 极轻量级 Windows 桌面常驻工具"
@@ -16,6 +16,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_Security",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",

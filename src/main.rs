@@ -17,6 +17,7 @@
 #![windows_subsystem = "windows"]
 
 mod about;
+mod autostart;
 mod detect;
 mod floater;
 mod icon;
@@ -60,6 +61,8 @@ struct App {
     hicon_sm: HICON,
     /// 关于对话框句柄（防重入；销毁经 WM_APP_ABOUT_CLOSED 清空）
     about_hwnd: Option<HWND>,
+    /// 开机自启动勾选状态（真源是注册表，此处仅作菜单显示缓存，见 src/autostart.rs）
+    auto_start: bool,
 }
 
 impl App {
@@ -94,7 +97,7 @@ impl App {
             CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("TimeStick"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst), None)?
         };
         let tray = tray::Tray::new(main_hwnd)?;
-        Ok(App { main_hwnd, floater, tray, hicon, hicon_sm, about_hwnd: None })
+        Ok(App { main_hwnd, floater, tray, hicon, hicon_sm, about_hwnd: None, auto_start: autostart::is_enabled() })
     }
 
     fn request_exit(&mut self) {
@@ -127,7 +130,7 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         let app = &mut *app_ptr;
         match msg {
             WM_APP_TRAY => {
-                app.tray.on_message(lparam, app.floater.show_seconds(), app.floater.seven_seg());
+                app.tray.on_message(lparam, app.floater.show_seconds(), app.floater.seven_seg(), app.auto_start);
                 LRESULT(0)
             }
             WM_COMMAND => {
@@ -160,6 +163,14 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                     Log::log("tray: style seven-seg");
                     if app.floater.set_seven_seg(true) {
                         settings::save(&settings::Settings { show_seconds: app.floater.show_seconds(), seven_seg: true });
+                    }
+                } else if id == tray::TRAY_CMD_AUTO_START {
+                    Log::log(if app.auto_start { "tray: disable auto-start" } else { "tray: enable auto-start" });
+                    // 注册表为真源：写入失败不翻转缓存，菜单勾选保持与实际一致
+                    if let Err(e) = autostart::set_enabled(!app.auto_start) {
+                        Log::log(&format!("auto-start toggle failed: {e}"));
+                    } else {
+                        app.auto_start = !app.auto_start;
                     }
                 }
                 LRESULT(0)
