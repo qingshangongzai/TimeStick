@@ -75,6 +75,7 @@ impl App {
         let pref = settings::load();
         let _ = floater.set_show_seconds(pref.show_seconds);
         let _ = floater.set_seven_seg(pref.seven_seg);
+        let _ = floater.set_size_level(pref.size_level);
 
         // 隐藏主窗口：承载托盘回调、全局热键与全屏消息
         let class = w!("TimeStickMain");
@@ -98,6 +99,15 @@ impl App {
         };
         let tray = tray::Tray::new(main_hwnd)?;
         Ok(App { main_hwnd, floater, tray, hicon, hicon_sm, about_hwnd: None, auto_start: autostart::is_enabled() })
+    }
+
+    /// 从各真源收集当前偏好并持久化（切换生效后调用）。
+    fn save_prefs(&self) {
+        settings::save(&settings::Settings {
+            show_seconds: self.floater.show_seconds(),
+            seven_seg: self.floater.seven_seg(),
+            size_level: self.floater.size_level(),
+        });
     }
 
     fn request_exit(&mut self) {
@@ -130,7 +140,7 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         let app = &mut *app_ptr;
         match msg {
             WM_APP_TRAY => {
-                app.tray.on_message(lparam, app.floater.show_seconds(), app.floater.seven_seg(), app.auto_start);
+                app.tray.on_message(lparam, app.floater.show_seconds(), app.floater.seven_seg(), app.floater.size_level(), app.auto_start);
                 LRESULT(0)
             }
             WM_COMMAND => {
@@ -147,22 +157,29 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                     Log::log("tray: format HH:MM");
                     // 重建失败时本次切换未生效，不持久化，避免重启后恢复未生效的格式
                     if app.floater.set_show_seconds(false) {
-                        settings::save(&settings::Settings { show_seconds: false, seven_seg: app.floater.seven_seg() });
+                        app.save_prefs();
                     }
                 } else if id == tray::TRAY_CMD_FORMAT_HMS {
                     Log::log("tray: format HH:MM:SS");
                     if app.floater.set_show_seconds(true) {
-                        settings::save(&settings::Settings { show_seconds: true, seven_seg: app.floater.seven_seg() });
+                        app.save_prefs();
                     }
                 } else if id == tray::TRAY_CMD_STYLE_DEFAULT {
                     Log::log("tray: style default font");
                     if app.floater.set_seven_seg(false) {
-                        settings::save(&settings::Settings { show_seconds: app.floater.show_seconds(), seven_seg: false });
+                        app.save_prefs();
                     }
                 } else if id == tray::TRAY_CMD_STYLE_SEG {
                     Log::log("tray: style seven-seg");
                     if app.floater.set_seven_seg(true) {
-                        settings::save(&settings::Settings { show_seconds: app.floater.show_seconds(), seven_seg: true });
+                        app.save_prefs();
+                    }
+                } else if (tray::TRAY_CMD_SIZE_XS..=tray::TRAY_CMD_SIZE_XL).contains(&id) {
+                    // 档位索引由命令 ID 区间算出（ID 连续，起点为极小档，见 tray.rs）
+                    let level = (id - tray::TRAY_CMD_SIZE_XS) as u8;
+                    Log::log(&format!("tray: size level {level}"));
+                    if app.floater.set_size_level(level) {
+                        app.save_prefs();
                     }
                 } else if id == tray::TRAY_CMD_AUTO_START {
                     Log::log(if app.auto_start { "tray: disable auto-start" } else { "tray: enable auto-start" });

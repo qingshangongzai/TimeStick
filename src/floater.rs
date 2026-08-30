@@ -37,7 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::log::Log;
 use crate::position;
-use crate::render::Renderer;
+use crate::render::{self, Renderer};
 
 const ID_TIMER: usize = 1; // 时间刷新（每次触发后按距下次显示变化的毫秒数重排）
 const ID_HOVER: usize = 2; // 固定模式悬停检测（250ms）
@@ -64,6 +64,8 @@ pub struct Floater {
     show_seconds: bool,
     /// 七段数码管显示风格；false 为默认字体。勾选状态唯一真源，托盘菜单每次弹出时读取
     seven_seg: bool,
+    /// 显示大小档位索引（render::FONT_LEVELS 下标）；勾选状态唯一真源，托盘菜单每次弹出时读取
+    size_level: u8,
     /// 当前窗口左上角位置（会话内记忆，拖动后更新）
     pos: Option<POINT>,
     dragging: bool,
@@ -85,6 +87,7 @@ impl Floater {
             visible: false,
             show_seconds: false,
             seven_seg: false,
+            size_level: render::SIZE_LEVEL_DEFAULT,
             pos: None,
             dragging: false,
             drag_start: POINT::default(),
@@ -139,24 +142,55 @@ impl Floater {
         }
     }
 
-    /// 按当前 show_seconds/seven_seg 重建渲染器并适配窗口（两个 setter 共用）。
+    /// 当前显示大小档位（render::FONT_LEVELS 下标，供托盘菜单勾选状态）。
+    pub fn size_level(&self) -> u8 {
+        self.size_level
+    }
+
+    /// 切换显示大小档位：语义同 set_show_seconds。
+    pub fn set_size_level(&mut self, level: u8) -> bool {
+        if self.size_level == level {
+            return true;
+        }
+        let old = self.size_level;
+        self.size_level = level;
+        if !self.recreate() {
+            // 重建失败：还原字段，保持「字段与渲染器一致」的不变式
+            self.size_level = old;
+            false
+        } else {
+            true
+        }
+    }
+
+    /// 按当前 show_seconds/seven_seg/size_level 重建渲染器并适配窗口（三个 setter 共用）。
     /// 窗口不可见返回 true（下次 show() 的 ensure_created 按新字段建）；
     /// 重建失败恢复旧渲染器并返回 false（调用方回滚字段）。
     fn recreate(&mut self) -> bool {
         let Some(hwnd) = self.hwnd else { return true };
         // hwnd 与 renderer 同生共死（ensure_created / hide），此处必为 Some；先 take 以便失败时放回
         let old = self.renderer.take();
-        match Renderer::new(self.show_seconds, self.seven_seg) {
+        // 旧尺寸用于中心锚点；真为 None 时退化为左上角锚点，无害
+        let old_size = old.as_ref().map_or((0, 0), |r| r.size);
+        // 索引不变量：size_level 的两个写入入口均保证合法 —— settings::parse 校验上界、
+        // tray 命令 ID 由 TRAY_CMD_SIZE_XS + n（n ∈ 0..4）计算，故不做运行期越界兜底
+        match Renderer::new(self.show_seconds, self.seven_seg, render::FONT_LEVELS[self.size_level as usize]) {
             Ok(renderer) => {
                 let (w, h) = renderer.size;
                 self.renderer = Some(renderer);
-                // 新宽超出当前屏右缘则左移夹取；GetMonitorInfoW 失败跳过夹取仅改尺寸（降级，窗口可拖回）
+                // 中心锚点：尺寸变化时窗口中心保持不动（视觉上向四周等向扩张）
                 let mut pos = self.pos.unwrap_or(POINT { x: 0, y: 0 });
+                pos.x -= (w - old_size.0) / 2;
+                pos.y -= (h - old_size.1) / 2;
                 unsafe {
                     let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                     let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-                    if GetMonitorInfoW(mon, &mut mi).as_bool() && pos.x + w > mi.rcMonitor.right {
-                        pos.x = mi.rcMonitor.right - w;
+                    // 四向夹取保证窗口完整可见（窗口最大 256px 远小于任何显示器，min ≤ max 恒成立）；
+                    // GetMonitorInfoW 失败跳过夹取仅改尺寸（降级，窗口可拖回）
+                    if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                        let m = mi.rcMonitor;
+                        pos.x = pos.x.clamp(m.left, m.right - w);
+                        pos.y = pos.y.clamp(m.top, m.bottom - h);
                     }
                 }
                 self.pos = Some(pos);
@@ -199,7 +233,7 @@ impl Floater {
         };
         unsafe { let _ = RegisterClassExW(&wc); }
 
-        let renderer = Renderer::new(self.show_seconds, self.seven_seg)?;
+        let renderer = Renderer::new(self.show_seconds, self.seven_seg, render::FONT_LEVELS[self.size_level as usize])?;
         let (w, h) = renderer.size;
         // WS_EX_NOACTIVATE：点击时钟不抢游戏焦点（全屏检测不受干扰）
         let ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;

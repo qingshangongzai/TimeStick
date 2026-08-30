@@ -44,6 +44,12 @@ pub const TRAY_CMD_FORMAT_HMS: usize = 1004; // 时间格式：HH:MM:SS
 pub const TRAY_CMD_STYLE_DEFAULT: usize = 1005; // 显示风格：默认字体
 pub const TRAY_CMD_STYLE_SEG: usize = 1006; // 显示风格：七段数码管
 pub const TRAY_CMD_AUTO_START: usize = 1007; // 开机自启动（勾选）
+// 显示大小五档：极小 / 小 / 中 / 大 / 特大。命令 ID 连续，档位索引 = id - TRAY_CMD_SIZE_XS
+pub const TRAY_CMD_SIZE_XS: usize = 1008;
+pub const TRAY_CMD_SIZE_S: usize = 1009;
+pub const TRAY_CMD_SIZE_M: usize = 1010;
+pub const TRAY_CMD_SIZE_L: usize = 1011;
+pub const TRAY_CMD_SIZE_XL: usize = 1012;
 const TRAY_ID: u32 = 1;
 
 pub struct Tray {
@@ -88,15 +94,15 @@ impl Tray {
     }
 
     /// 处理托盘回调消息（uCallbackMessage = WM_APP_TRAY，lparam 为鼠标消息）。
-    /// show_seconds / seven_seg / auto_start 由调用方（main.rs）从各真源传入当前值
+    /// show_seconds / seven_seg / size_level / auto_start 由调用方（main.rs）从各真源传入当前值
     /// ——勾选状态真源唯一（自启动的真源是注册表，见 src/autostart.rs）。
-    pub fn on_message(&self, lparam: LPARAM, show_seconds: bool, seven_seg: bool, auto_start: bool) {
+    pub fn on_message(&self, lparam: LPARAM, show_seconds: bool, seven_seg: bool, size_level: u8, auto_start: bool) {
         if (lparam.0 as u32) == WM_RBUTTONUP {
-            self.show_menu(show_seconds, seven_seg, auto_start);
+            self.show_menu(show_seconds, seven_seg, size_level, auto_start);
         }
     }
 
-    fn show_menu(&self, show_seconds: bool, seven_seg: bool, auto_start: bool) {
+    fn show_menu(&self, show_seconds: bool, seven_seg: bool, size_level: u8, auto_start: bool) {
         unsafe {
             // 菜单正常关闭需要窗口处于前台
             let _ = SetForegroundWindow(self.hwnd);
@@ -112,6 +118,13 @@ impl Tray {
                 let _ = DestroyMenu(submenu);
                 return;
             };
+            // 「显示大小」子菜单创建失败同样整体放弃（此时 submenu / style_menu 已建，一并清理）
+            let Ok(size_menu) = CreatePopupMenu() else {
+                let _ = DestroyMenu(menu);
+                let _ = DestroyMenu(submenu);
+                let _ = DestroyMenu(style_menu);
+                return;
+            };
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_SHOW, w!("显示悬浮窗"));
             // 单选组：当前项勾选。MF_RADIO 与 MF_BYPOSITION 同值（0x400），crate 未导出
             // 且该位会被按位置解释，故用 MF_CHECKED 标记当前项
@@ -123,6 +136,12 @@ impl Tray {
             let _ = AppendMenuW(style_menu, if seven_seg { unchecked } else { checked }, TRAY_CMD_STYLE_DEFAULT, w!("默认字体"));
             let _ = AppendMenuW(style_menu, if seven_seg { checked } else { unchecked }, TRAY_CMD_STYLE_SEG, w!("七段数码管"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_POPUP.0), style_menu.0 as usize, w!("显示风格"));
+            let _ = AppendMenuW(size_menu, if size_level == 0 { checked } else { unchecked }, TRAY_CMD_SIZE_XS, w!("极小"));
+            let _ = AppendMenuW(size_menu, if size_level == 1 { checked } else { unchecked }, TRAY_CMD_SIZE_S, w!("小"));
+            let _ = AppendMenuW(size_menu, if size_level == 2 { checked } else { unchecked }, TRAY_CMD_SIZE_M, w!("中"));
+            let _ = AppendMenuW(size_menu, if size_level == 3 { checked } else { unchecked }, TRAY_CMD_SIZE_L, w!("大"));
+            let _ = AppendMenuW(size_menu, if size_level == 4 { checked } else { unchecked }, TRAY_CMD_SIZE_XL, w!("特大"));
+            let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_POPUP.0), size_menu.0 as usize, w!("显示大小"));
             let _ = AppendMenuW(menu, if auto_start { checked } else { unchecked }, TRAY_CMD_AUTO_START, w!("开机自启动"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_ABOUT, w!("关于"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_EXIT, w!("直接退出"));
@@ -135,6 +154,7 @@ impl Tray {
             let _ = DestroyMenu(menu);
             let _ = DestroyMenu(submenu);
             let _ = DestroyMenu(style_menu);
+            let _ = DestroyMenu(size_menu);
         }
     }
 
@@ -225,5 +245,26 @@ fn create_clock_icon() -> Result<HICON> {
         let _ = DeleteObject(HGDIOBJ(hbm.0));
         let _ = DeleteDC(hdc);
         Ok(icon)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 档位命令 ID 连续且落在 FONT_LEVELS 下标范围内 —— main.rs 按 `id - TRAY_CMD_SIZE_XS`
+    /// 算索引后直接查表，越界即 panic，故此处锁定该不变量
+    #[test]
+    fn size_cmd_ids_map_to_valid_levels() {
+        let ids = [TRAY_CMD_SIZE_XS, TRAY_CMD_SIZE_S, TRAY_CMD_SIZE_M, TRAY_CMD_SIZE_L, TRAY_CMD_SIZE_XL];
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(id - TRAY_CMD_SIZE_XS, i, "档位命令 ID 必须连续");
+            assert!(id - TRAY_CMD_SIZE_XS < crate::render::FONT_LEVELS.len(), "档位索引越界");
+        }
+        // 不得与既有命令 ID 重叠
+        let taken = [TRAY_CMD_SHOW, TRAY_CMD_EXIT, TRAY_CMD_ABOUT, TRAY_CMD_FORMAT_HM, TRAY_CMD_FORMAT_HMS, TRAY_CMD_STYLE_DEFAULT, TRAY_CMD_STYLE_SEG, TRAY_CMD_AUTO_START];
+        for id in ids {
+            assert!(!taken.contains(&id), "档位命令 ID 与既有命令冲突: {id}");
+        }
     }
 }
