@@ -21,24 +21,26 @@ use std::mem::size_of;
 use std::ptr::addr_of_mut;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWM_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET,
     DEFAULT_PITCH, DEFAULT_QUALITY, DeleteObject, DrawTextW, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
-    EndPaint, FillRect, FONT_WEIGHT, FW_BOLD, FW_NORMAL, GetMonitorInfoW, GetSysColorBrush, HBRUSH,
-    HDC, HFONT, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, ScreenToClient, SelectObject, SetBkColor, SetBkMode,
-    SetTextColor, TRANSPARENT,
+    EndPaint, FillRect, FONT_WEIGHT, FW_BOLD, FW_NORMAL, GetDC, GetMonitorInfoW, GetSysColorBrush,
+    GetTextExtentPoint32W, GetTextMetricsW, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    ReleaseDC, ScreenToClient, SelectObject, SetBkColor, SetBkMode, SetTextColor, TEXTMETRICW,
+    TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::SystemServices::SS_ICON;
+use windows::Win32::System::SystemServices::{SS_ICON, SS_NOTIFY, SS_RIGHT};
 use windows::Win32::System::WindowsProgramming::MulDiv;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TrackMouseEvent, TRACKMOUSEEVENT};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::icon;
@@ -60,6 +62,23 @@ const COL_TEXT_LABEL: COLORREF = COLORREF(0x0033_3333); // 区标题：深灰
 const COL_TEXT_SECONDARY: COLORREF = COLORREF(0x0075_7575); // 辅助信息：中灰
 const COL_EDIT_TEXT: COLORREF = COLORREF(0x0026_2626); // 许可正文：85% 黑
 const COL_EDIT_FILL: COLORREF = COLORREF(0x00F7_F7F7); // 填充式许可框底：约 3% 灰度阶差
+const COL_LINK: COLORREF = COLORREF(0x0000_66CC); // 链接：可点击蓝（白底对比度达标）
+
+/// 项目主页（点击唤起默认浏览器）
+const PROJECT_URL: &str = "https://gitee.com/qingshangongzai/TimeStick";
+/// 联系邮箱显示文本（点击时以 mailto: 协议唤起默认邮件客户端）
+const EMAIL: &str = "qingshangongzai@163.com";
+const MAIL_TARGET: &str = "mailto:qingshangongzai@163.com";
+/// 链接控件 ID：WM_COMMAND 按此区分项目主页 / 联系邮箱
+const IDC_URL_LINK: isize = 1;
+const IDC_MAIL_LINK: isize = 2;
+/// 应用名（名称控件文本唯一来源）
+const NAME_TEXT: &str = "时间贴";
+/// 顶部图标边长（逻辑像素）：与名称块（名称 + slogan）同高，由字号/间距常量推导，
+/// 调整 NAME_H / LINE_H / GAP 时自动跟随，避免图标与文字块高度错位
+const ICON_SIZE: i32 = NAME_H + GAP / 2 + LINE_H; // 24 + 4 + 20 = 48
+/// 链接行标签列位宽（右对齐，冒号右缘贴齐统一）：5 个全角字符 × 9pt em（12px）
+const LINK_LABEL_W: i32 = 64;
 
 /// 木兰官方应用指引第 1 步：补充软件名与版权人后的声明行
 const MULAN_NOTICE: &str = "Copyright (c) 2026 青山公仔 · TimeStick（时间贴）is licensed under Mulan PSL v2.";
@@ -75,16 +94,25 @@ struct AboutState {
     font_name: HFONT,
     font_label: HFONT,
     font_body: HFONT,
+    font_link: HFONT,
     fill_brush: HBRUSH,
     /// owner（主窗口）句柄：WM_DESTROY 时直接通知，不依赖 GetParent
     owner: HWND,
     /// 标题栏小图标（自行加载/销毁；WM_SETICON 不转移所有权）
     icon_sm: HICON,
     dpi: u32,
+    /// 版本行文本（"版本 x.y.z"；创建与名称行宽度测量共用）
+    ver_text: String,
     icon_st: HWND,
     name_st: HWND,
     ver_st: HWND,
+    dev_label: HWND,
+    dev_st: HWND,
     desc_st: HWND,
+    url_label: HWND,
+    url_st: HWND,
+    email_label: HWND,
+    email_st: HWND,
     own_label: HWND,
     notice_st: HWND,
     own_edit: HWND,
@@ -189,14 +217,15 @@ unsafe fn register_close_class(hinst: HINSTANCE) {
 /// 创建字体 / 图标 / 全部子控件并挂载 AboutState（经 GWLP_USERDATA 回传）。
 unsafe fn setup(hwnd: HWND, owner: HWND, dpi: u32) {
     unsafe {
-        // 字重分层：名称 12pt 粗体 / 区标题 9pt 粗体 / 正文 9pt
-        let font_name = create_font(dpi, FW_BOLD, 12);
-        let font_label = create_font(dpi, FW_BOLD, 9);
-        let font_body = create_font(dpi, FW_NORMAL, 9);
+        // 字重分层：名称 12pt 粗体 / 区标题 9pt 粗体 / 正文 9pt / 链接 9pt 下划线
+        let font_name = create_font(dpi, FW_BOLD, 12, false);
+        let font_label = create_font(dpi, FW_BOLD, 9, false);
+        let font_body = create_font(dpi, FW_NORMAL, 9, false);
+        let font_link = create_font(dpi, FW_NORMAL, 9, true);
         let fill_brush = CreateSolidBrush(COL_EDIT_FILL);
         // 图标交给 SS_ICON STATIC 持有（控件销毁时系统自动销毁），WM_SETICON 不转移所有权；
-        // 按 DPI 取物理尺寸帧（150% → 48px 恰命中 .ico 精确帧，避免 32px 位图被拉伸发糊）
-        let icon = icon::load(icon::LARGE * dpi as i32 / 96).unwrap_or_default();
+        // 按 DPI 取物理尺寸帧（96% → 48px 命中 .ico 精确帧），避免 32px 位图被拉伸发糊
+        let icon = icon::load(ICON_SIZE * dpi as i32 / 96).unwrap_or_default();
         // 标题栏小图标：按 DPI 取原生尺寸帧（150% → 24px），避免系统缩放模糊
         let icon_sm = icon::load(icon::SMALL * dpi as i32 / 96).unwrap_or_default();
 
@@ -204,14 +233,22 @@ unsafe fn setup(hwnd: HWND, owner: HWND, dpi: u32) {
             font_name,
             font_label,
             font_body,
+            font_link,
             fill_brush,
             owner,
             icon_sm,
             dpi,
+            ver_text: String::new(),
             icon_st: HWND::default(),
             name_st: HWND::default(),
             ver_st: HWND::default(),
+            dev_label: HWND::default(),
+            dev_st: HWND::default(),
             desc_st: HWND::default(),
+            url_label: HWND::default(),
+            url_st: HWND::default(),
+            email_label: HWND::default(),
+            email_st: HWND::default(),
             own_label: HWND::default(),
             notice_st: HWND::default(),
             own_edit: HWND::default(),
@@ -232,26 +269,48 @@ unsafe fn setup(hwnd: HWND, owner: HWND, dpi: u32) {
         let _ = SendMessageW(st.icon_st, STM_SETICON, Some(WPARAM(icon.0 as usize)), Some(LPARAM(0)));
         let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(icon.0 as isize)));
         let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(st.icon_sm.0 as isize)));
-        st.name_st = create_child(hwnd, w!("Static"), w!("时间贴"), st_basic, None);
+        st.name_st = create_child(hwnd, w!("Static"), PCWSTR::null(), st_basic, None);
+        set_text(st.name_st, NAME_TEXT);
         st.ver_st = create_child(hwnd, w!("Static"), PCWSTR::null(), st_basic, None);
-        set_text(
-            st.ver_st,
-            &format!("版本 {} · 开发 {}", env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_AUTHORS")),
-        );
+        let ver_text = format!("版本 {}", env!("CARGO_PKG_VERSION"));
+        st.ver_text = ver_text.clone();
+        set_text(st.ver_st, &ver_text);
+        st.dev_label = create_child(hwnd, w!("Static"), w!("开发者："), WINDOW_STYLE(st_basic.0 | SS_RIGHT.0), None);
+        st.dev_st = create_child(hwnd, w!("Static"), PCWSTR::null(), st_basic, None);
+        set_text(st.dev_st, env!("CARGO_PKG_AUTHORS"));
         st.desc_st = create_child(hwnd, w!("Static"), PCWSTR::null(), st_basic, None);
         set_text(st.desc_st, env!("CARGO_PKG_DESCRIPTION"));
+        // 项目地址 / 邮箱：灰标签（右对齐贴齐）+ 蓝色下划线链接（SS_NOTIFY 点击上报 STN_CLICKED）
+        st.url_label = create_child(hwnd, w!("Static"), w!("项目地址："), WINDOW_STYLE(st_basic.0 | SS_RIGHT.0), None);
+        st.url_st = create_child(
+            hwnd,
+            w!("Static"),
+            PCWSTR::null(),
+            WINDOW_STYLE(st_basic.0 | SS_NOTIFY.0),
+            Some(IDC_URL_LINK),
+        );
+        set_text(st.url_st, PROJECT_URL);
+        st.email_label = create_child(hwnd, w!("Static"), w!("邮箱："), WINDOW_STYLE(st_basic.0 | SS_RIGHT.0), None);
+        st.email_st = create_child(
+            hwnd,
+            w!("Static"),
+            PCWSTR::null(),
+            WINDOW_STYLE(st_basic.0 | SS_NOTIFY.0),
+            Some(IDC_MAIL_LINK),
+        );
+        set_text(st.email_st, EMAIL);
 
         // 本项目许可证区：标题 + 声明行 + 固定高全文框
         st.own_label = create_child(hwnd, w!("Static"), w!("本项目许可证"), st_basic, None);
         st.notice_st = create_child(hwnd, w!("Static"), PCWSTR::null(), st_basic, None);
         set_text(st.notice_st, MULAN_NOTICE);
         st.own_edit = create_child(hwnd, w!("Edit"), PCWSTR::null(), st_edit, None);
-        set_text(st.own_edit, LICENSE_TEXT);
+        set_text(st.own_edit, &condense_blank_lines(LICENSE_TEXT));
 
         // 第三方许可区：标题 + 弹性高全文框
         st.tp_label = create_child(hwnd, w!("Static"), w!("第三方开源许可"), st_basic, None);
         st.tp_edit = create_child(hwnd, w!("Edit"), PCWSTR::null(), st_edit, None);
-        set_text(st.tp_edit, NOTICES);
+        set_text(st.tp_edit, &condense_blank_lines(NOTICES));
 
         // 自绘关闭按钮（无边框窗口无系统标题栏；位置由 layout 摆放）
         st.close_btn = create_child(hwnd, CLOSE_CLASS, PCWSTR::null(), st_basic, None);
@@ -273,7 +332,19 @@ unsafe fn apply_fonts(st: &AboutState) {
         set_font(st.name_st, st.font_name);
         set_font(st.own_label, st.font_label);
         set_font(st.tp_label, st.font_label);
-        for h in [st.ver_st, st.desc_st, st.notice_st, st.own_edit, st.tp_edit] {
+        set_font(st.url_st, st.font_link);
+        set_font(st.email_st, st.font_link);
+        for h in [
+            st.ver_st,
+            st.dev_label,
+            st.dev_st,
+            st.desc_st,
+            st.url_label,
+            st.email_label,
+            st.notice_st,
+            st.own_edit,
+            st.tp_edit,
+        ] {
             set_font(h, st.font_body);
         }
     }
@@ -282,10 +353,11 @@ unsafe fn apply_fonts(st: &AboutState) {
 /// 按新 DPI 重建三档字体（先建新并下发控件，再删旧，避免控件引用悬垂）。
 unsafe fn rebuild_fonts(st: &mut AboutState, dpi: u32) {
     unsafe {
-        let old = [st.font_name, st.font_label, st.font_body];
-        st.font_name = create_font(dpi, FW_BOLD, 12);
-        st.font_label = create_font(dpi, FW_BOLD, 9);
-        st.font_body = create_font(dpi, FW_NORMAL, 9);
+        let old = [st.font_name, st.font_label, st.font_body, st.font_link];
+        st.font_name = create_font(dpi, FW_BOLD, 12, false);
+        st.font_label = create_font(dpi, FW_BOLD, 9, false);
+        st.font_body = create_font(dpi, FW_NORMAL, 9, false);
+        st.font_link = create_font(dpi, FW_NORMAL, 9, true);
         apply_fonts(st);
         for f in old {
             let _ = DeleteObject(HGDIOBJ(f.0));
@@ -299,7 +371,7 @@ unsafe fn rebuild_fonts(st: &mut AboutState, dpi: u32) {
 /// 窗口大/小图标先换绑到新句柄再销毁旧句柄，避免标题栏引用已销毁句柄。
 unsafe fn reload_icons(st: &mut AboutState, hwnd: HWND, dpi: u32) {
     unsafe {
-        let new_icon = icon::load(icon::LARGE * dpi as i32 / 96).unwrap_or_default();
+        let new_icon = icon::load(ICON_SIZE * dpi as i32 / 96).unwrap_or_default();
         if new_icon.is_invalid() {
             return;
         }
@@ -324,8 +396,8 @@ unsafe fn reload_icons(st: &mut AboutState, hwnd: HWND, dpi: u32) {
     }
 }
 
-/// Segoe UI 字体：高度 = -字号(pt) × dpi / 72（负值表示字符高度）。
-unsafe fn create_font(dpi: u32, weight: FONT_WEIGHT, pt: i32) -> HFONT {
+/// Segoe UI 字体：高度 = -字号(pt) × dpi / 72（负值表示字符高度）；underline 控制下划线（链接用）。
+unsafe fn create_font(dpi: u32, weight: FONT_WEIGHT, pt: i32, underline: bool) -> HFONT {
     unsafe {
         CreateFontW(
             -MulDiv(pt, dpi as i32, 72),
@@ -334,7 +406,7 @@ unsafe fn create_font(dpi: u32, weight: FONT_WEIGHT, pt: i32) -> HFONT {
             0,
             weight.0 as i32,
             0,
-            0,
+            underline as u32,
             0,
             DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS,
@@ -394,7 +466,7 @@ unsafe extern "system" fn about_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                 let _ = ScreenToClient(hwnd, &mut pt);
                 let mut rc = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rc);
-                let band = (MARGIN + icon::LARGE) * st.dpi as i32 / 96;
+                let band = (MARGIN + ICON_SIZE) * st.dpi as i32 / 96;
                 if pt.y >= 0 && pt.y < band && pt.x >= 0 && pt.x < rc.right {
                     LRESULT(HTCAPTION as isize)
                 } else {
@@ -403,6 +475,29 @@ unsafe extern "system" fn about_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             }
             // 关闭按钮经此间接取区标题字体：父窗口 DPI 重建字体后下次重绘自动跟随
             WM_GETFONT => LRESULT(st.font_label.0 as isize),
+            // 链接控件（SS_NOTIFY）点击 → STN_CLICKED，按控件 ID 打开对应目标
+            WM_COMMAND => {
+                let id = (wparam.0 as u16) as isize;
+                if (wparam.0 >> 16) as u16 == STN_CLICKED as u16 {
+                    match id {
+                        IDC_URL_LINK => open_link(hwnd, PROJECT_URL),
+                        IDC_MAIL_LINK => open_link(hwnd, MAIL_TARGET),
+                        _ => {}
+                    }
+                }
+                LRESULT(0)
+            }
+            // 链接悬停 → 手型光标（DefWindowProc 把子窗口的 WM_SETCURSOR 转交父窗口，
+            // wParam 即光标所在窗口句柄；返回 TRUE 表示光标已设置）
+            WM_SETCURSOR => {
+                let ctl = HWND(wparam.0 as *mut _);
+                if ctl == st.url_st || ctl == st.email_st {
+                    let _ = SetCursor(Some(LoadCursorW(None, IDC_HAND).unwrap_or_default()));
+                    LRESULT(1)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
             WM_CLOSE => {
                 let _ = DestroyWindow(hwnd);
                 LRESULT(0)
@@ -438,6 +533,7 @@ unsafe extern "system" fn about_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                 let _ = DeleteObject(HGDIOBJ(st.font_name.0));
                 let _ = DeleteObject(HGDIOBJ(st.font_label.0));
                 let _ = DeleteObject(HGDIOBJ(st.font_body.0));
+                let _ = DeleteObject(HGDIOBJ(st.font_link.0));
                 let _ = DeleteObject(HGDIOBJ(st.fill_brush.0));
                 // 图标不在此销毁：icon_st（SS_ICON STATIC）销毁时系统自动销毁（双重销毁曾致堆损坏）；
                 // 小图标无控件持有，由本状态自行销毁
@@ -532,6 +628,8 @@ unsafe fn on_ctl_color(st: &AboutState, hdc: HDC, ctl: HWND) -> LRESULT {
                 COL_TEXT_PRIMARY
             } else if ctl == st.own_label || ctl == st.tp_label {
                 COL_TEXT_LABEL
+            } else if ctl == st.url_st || ctl == st.email_st {
+                COL_LINK
             } else {
                 COL_TEXT_SECONDARY
             };
@@ -541,8 +639,29 @@ unsafe fn on_ctl_color(st: &AboutState, hdc: HDC, ctl: HWND) -> LRESULT {
     }
 }
 
+/// 用系统默认应用打开链接（浏览器 / 邮件客户端）；失败记日志降级。
+fn open_link(hwnd: HWND, target: &str) {
+    let mut buf: Vec<u16> = target.encode_utf16().collect();
+    buf.push(0);
+    let r = unsafe {
+        ShellExecuteW(
+            Some(hwnd),
+            w!("open"),
+            PCWSTR::from_raw(buf.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // 返回值大于 32 表示成功（32 及以下为 SE_ERR_* 错误码）
+    if (r.0 as isize) <= 32 {
+        Log::log("about: open link failed");
+    }
+}
+
 /// 按客户区与 DPI 重排子控件（8px 基准网格）：顶部信息组固定高，
-/// 自身许可框固定高，第三方许可框吃掉剩余高度（延伸到底部边距）。
+/// 声明行固定两行高（官方声明一行写不下，防折行截断），自身许可框固定高，
+/// 第三方许可框吃掉剩余高度（延伸到底部边距）。
 fn layout(hwnd: HWND, st: &AboutState) {
     unsafe {
         let mut rc = RECT::default();
@@ -556,32 +675,101 @@ fn layout(hwnd: HWND, st: &AboutState) {
         let group = GROUP_GAP * k / 96;
         let name_h = NAME_H * k / 96;
         let w = cw - 2 * m;
-        let icon_sz = icon::LARGE * k / 96;
+        let icon_sz = ICON_SIZE * k / 96;
         let own_h = OWN_LIC_BOX_H * k / 96;
         let close_sz = CLOSE_SZ * k / 96;
 
         let mut y = m;
         // 关闭按钮：右上角贴边（控制栏惯例——顶部/右边缘与窗口平齐，非页面边距）
         place(st.close_btn, cw - close_sz, 0, close_sz, close_sz);
-        // 顶部信息组：图标与名称并排（组内 8px），版本 / 描述整行
+        // 顶部信息组：图标（与名称块同高）+ 名称行（名称 12pt 粗体 + 版本 9pt 副标题并排，基线对齐）、
+        // slogan 9pt 灰紧随名称下方（4px）；头区高度即图标边长，名称块与图标顶底对齐
+        let head_h = icon_sz;
         place(st.icon_st, m, y, icon_sz, icon_sz);
-        place(st.name_st, m + icon_sz + gap, y + (icon_sz - name_h) / 2, w - icon_sz - gap, name_h);
-        y += icon_sz + gap;
-        place(st.ver_st, m, y, w, line);
+        let text_x = m + icon_sz + gap;
+        let hdc = GetDC(Some(hwnd));
+        let name_row = w - (text_x - m);
+        let name_w = text_width(hdc, st.font_name, NAME_TEXT).unwrap_or(48 * k / 96);
+        let ver_w = text_width(hdc, st.font_body, &st.ver_text)
+            .unwrap_or(80 * k / 96)
+            .min(name_row - name_w - gap);
+        place(st.name_st, text_x, y, name_w, name_h);
+        // 版本与名称基线对齐（不同字号各自垂直居中会错位，小字观感"偏上"，见 baseline_aligned_y）
+        let ver_y = y + baseline_aligned_y(hdc, st.font_body, line, st.font_name, name_h);
+        place(st.ver_st, text_x + name_w + gap, ver_y, ver_w, line);
+        place(st.desc_st, text_x, y + name_h + gap / 2, name_row, line);
+        y += head_h + gap;
+        // 联系组（开发者 / 项目地址 / 邮箱）：统一"标签右对齐 + 值两栏"版式，开发者为灰字
+        let link_label_w = LINK_LABEL_W * k / 96;
+        let link_x = m + link_label_w + gap;
+        let link_max = w - link_label_w - gap;
+        place(st.dev_label, m, y, link_label_w, line);
+        place(st.dev_st, link_x, y, link_max, line);
         y += line;
-        place(st.desc_st, m, y, w, line);
-        y += line + group;
-        // 本项目许可证组：标题 + 声明行 + 固定高全文框
+        for (label, link, text) in [
+            (st.url_label, st.url_st, PROJECT_URL),
+            (st.email_label, st.email_st, EMAIL),
+        ] {
+            place(label, m, y, link_label_w, line);
+            let lw = text_width(hdc, st.font_link, text).map(|n| n + gap).unwrap_or(link_max);
+            place(link, link_x, y, lw.min(link_max), line);
+            y += line;
+        }
+        if !hdc.is_invalid() {
+            let _ = ReleaseDC(Some(hwnd), hdc);
+        }
+        y += group;
+        // 本项目许可证组：标题 + 声明行（两行高）+ 固定高全文框
         place(st.own_label, m, y, w, line);
         y += line;
-        place(st.notice_st, m, y, w, line);
-        y += line + gap;
+        place(st.notice_st, m, y, w, line * 2);
+        y += line * 2 + gap;
         place(st.own_edit, m, y, w, own_h);
         y += own_h + group;
         // 第三方许可组：标题 + 弹性高全文框（吃掉剩余高度，延伸到底部边距）
         place(st.tp_label, m, y, w, line);
         y += line;
         place(st.tp_edit, m, y, w, ch - m - y);
+    }
+}
+
+/// 用当前字体实测文本宽（GetTextExtentPoint32W）；DC 无效或测量失败返回 None 由调用方降级。
+unsafe fn text_width(hdc: HDC, font: HFONT, text: &str) -> Option<i32> {
+    unsafe {
+        if hdc.is_invalid() {
+            return None;
+        }
+        let old = SelectObject(hdc, font.into());
+        let mut sz = SIZE::default();
+        let buf: Vec<u16> = text.encode_utf16().collect();
+        let ok = GetTextExtentPoint32W(hdc, &buf, &mut sz).as_bool();
+        let _ = SelectObject(hdc, old);
+        ok.then_some(sz.cx)
+    }
+}
+
+/// 小字号控件与参考控件"文字基线对齐"时的 y 偏移：STATIC 默认垂直居中，
+/// 字号不同则基线错位（小字相对大字观感偏上），按两字体 tmAscent/tmDescent 差补偿。
+fn baseline_aligned_y(hdc: HDC, font: HFONT, h: i32, ref_font: HFONT, ref_h: i32) -> i32 {
+    unsafe {
+        if hdc.is_invalid() {
+            return 0;
+        }
+        let tm = |f: HFONT| -> (i32, i32) {
+            let old = SelectObject(hdc, f.into());
+            let mut tm = TEXTMETRICW::default();
+            let ok = GetTextMetricsW(hdc, &mut tm).as_bool();
+            let _ = SelectObject(hdc, old);
+            if ok {
+                (tm.tmAscent, tm.tmDescent)
+            } else {
+                (0, 0)
+            }
+        };
+        let (a, d) = tm(font);
+        let (ra, rd) = tm(ref_font);
+        // 垂直居中时控件内基线 = (H + A - D) / 2；令两者基线相等解出 y 偏移
+        (ref_h + ra - rd - h - a + d) / 2
     }
 }
 
@@ -619,9 +807,53 @@ fn set_text(hwnd: HWND, s: &str) {
     unsafe { let _ = SetWindowTextW(hwnd, PCWSTR::from_raw(buf.as_ptr())); }
 }
 
+/// 许可正文显示前压平：连续空行折叠为一个空行（保留段落结构）、逐行裁掉行尾空白、
+/// 去掉首尾空行；\r\n 行分隔保持不变。只影响显示排版，不改源文件内容。
+fn condense_blank_lines(text: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut blank = false;
+    for line in text.split('\n') {
+        let line = line.trim_end_matches('\r').trim_end();
+        if line.is_empty() {
+            if blank {
+                continue;
+            }
+            blank = true;
+        } else {
+            blank = false;
+        }
+        kept.push(line);
+    }
+    while kept.first().is_some_and(|l| l.is_empty()) {
+        kept.remove(0);
+    }
+    while kept.last().is_some_and(|l| l.is_empty()) {
+        kept.pop();
+    }
+    kept.join("\r\n")
+}
+
 /// 移动子控件（保持 Z 序与激活状态不变）。
 unsafe fn place(h: HWND, x: i32, y: i32, w: i32, hgt: i32) {
     unsafe {
         let _ = SetWindowPos(h, None, x, y, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::condense_blank_lines;
+
+    #[test]
+    fn condenses_consecutive_blank_lines() {
+        let src = "a\r\n\r\n\r\nb\n\nc\r\n";
+        assert_eq!(condense_blank_lines(src), "a\r\n\r\nb\r\n\r\nc");
+    }
+
+    #[test]
+    fn trims_trailing_whitespace_and_edge_blank_lines() {
+        let src = "\r\n  a  \r\nb\t\r\n\u{3000}\r\n\r\n";
+        // 前导空格是正文缩进，保留；行尾空白与首尾空行去掉
+        assert_eq!(condense_blank_lines(src), "  a\r\nb");
     }
 }
