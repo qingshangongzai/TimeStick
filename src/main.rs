@@ -145,50 +145,61 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             }
             WM_COMMAND => {
                 let id = wparam.0 & 0xffff;
-                if id == tray::TRAY_CMD_SHOW {
-                    Log::log("tray: show floater");
-                    app.floater.show();
-                } else if id == tray::TRAY_CMD_ABOUT {
-                    Log::log("tray: about");
-                    about::show(&mut app.about_hwnd, app.main_hwnd);
-                } else if id == tray::TRAY_CMD_EXIT {
-                    app.request_exit();
-                } else if id == tray::TRAY_CMD_FORMAT_HM {
-                    Log::log("tray: format HH:MM");
-                    // 重建失败时本次切换未生效，不持久化，避免重启后恢复未生效的格式
-                    if app.floater.set_show_seconds(false) {
-                        app.save_prefs();
+                match id {
+                    tray::TRAY_CMD_SHOW => {
+                        Log::log("tray: show floater");
+                        app.floater.show();
                     }
-                } else if id == tray::TRAY_CMD_FORMAT_HMS {
-                    Log::log("tray: format HH:MM:SS");
-                    if app.floater.set_show_seconds(true) {
-                        app.save_prefs();
+                    tray::TRAY_CMD_ABOUT => {
+                        Log::log("tray: about");
+                        about::show(&mut app.about_hwnd, app.main_hwnd);
                     }
-                } else if id == tray::TRAY_CMD_STYLE_DEFAULT {
-                    Log::log("tray: style default font");
-                    if app.floater.set_seven_seg(false) {
-                        app.save_prefs();
+                    tray::TRAY_CMD_EXIT => {
+                        app.request_exit();
                     }
-                } else if id == tray::TRAY_CMD_STYLE_SEG {
-                    Log::log("tray: style seven-seg");
-                    if app.floater.set_seven_seg(true) {
-                        app.save_prefs();
+                    tray::TRAY_CMD_FORMAT_HM => {
+                        Log::log("tray: format HH:MM");
+                        // 重建失败时本次切换未生效，不持久化，避免重启后恢复未生效的格式
+                        if app.floater.set_show_seconds(false) {
+                            app.save_prefs();
+                        }
                     }
-                } else if (tray::TRAY_CMD_SIZE_XS..=tray::TRAY_CMD_SIZE_XL).contains(&id) {
+                    tray::TRAY_CMD_FORMAT_HMS => {
+                        Log::log("tray: format HH:MM:SS");
+                        if app.floater.set_show_seconds(true) {
+                            app.save_prefs();
+                        }
+                    }
+                    tray::TRAY_CMD_STYLE_DEFAULT => {
+                        Log::log("tray: style default font");
+                        if app.floater.set_seven_seg(false) {
+                            app.save_prefs();
+                        }
+                    }
+                    tray::TRAY_CMD_STYLE_SEG => {
+                        Log::log("tray: style seven-seg");
+                        if app.floater.set_seven_seg(true) {
+                            app.save_prefs();
+                        }
+                    }
                     // 档位索引由命令 ID 区间算出（ID 连续，起点为极小档，见 tray.rs）
-                    let level = (id - tray::TRAY_CMD_SIZE_XS) as u8;
-                    Log::log(&format!("tray: size level {level}"));
-                    if app.floater.set_size_level(level) {
-                        app.save_prefs();
+                    tray::TRAY_CMD_SIZE_XS..=tray::TRAY_CMD_SIZE_XL => {
+                        let level = (id - tray::TRAY_CMD_SIZE_XS) as u8;
+                        Log::log(&format!("tray: size level {level}"));
+                        if app.floater.set_size_level(level) {
+                            app.save_prefs();
+                        }
                     }
-                } else if id == tray::TRAY_CMD_AUTO_START {
-                    Log::log(if app.auto_start { "tray: disable auto-start" } else { "tray: enable auto-start" });
-                    // 注册表为真源：写入失败不翻转缓存，菜单勾选保持与实际一致
-                    if let Err(e) = autostart::set_enabled(!app.auto_start) {
-                        Log::log(&format!("auto-start toggle failed: {e}"));
-                    } else {
-                        app.auto_start = !app.auto_start;
+                    tray::TRAY_CMD_AUTO_START => {
+                        Log::log(if app.auto_start { "tray: disable auto-start" } else { "tray: enable auto-start" });
+                        // 注册表为真源：写入失败不翻转缓存，菜单勾选保持与实际一致
+                        if let Err(e) = autostart::set_enabled(!app.auto_start) {
+                            Log::log(&format!("auto-start toggle failed: {e}"));
+                        } else {
+                            app.auto_start = !app.auto_start;
+                        }
                     }
+                    _ => {} // 未知命令：忽略
                 }
                 LRESULT(0)
             }

@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn parse_size_level_accepts_all_levels() {
-        // 四个合法档位索引
+        // 五个合法档位索引（0..FONT_LEVELS.len()）
         for n in 0..crate::render::FONT_LEVELS.len() as u8 {
             assert_eq!(parse(&format!("size_level={n}\n")).size_level, n);
         }
