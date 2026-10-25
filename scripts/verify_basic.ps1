@@ -1,6 +1,6 @@
 ﻿# TimeStick 运行时验证脚本（阶段1：依赖/启动/单实例/内存）
 $ErrorActionPreference = "Continue"
-$exe = "D:\青山公仔\应用\Code\TimeStick\target\release\timestick.exe"
+$exe = Join-Path $PSScriptRoot "..\target\release\timestick.exe"
 $log = "$env:TEMP\timestick_test.log"
 Remove-Item $log -ErrorAction SilentlyContinue
 

@@ -13,8 +13,8 @@
 //! 应用黑名单：列表内的应用处于前台时，悬浮窗不显示。
 //! 存 %APPDATA%\TimeStick\blacklist.txt，逐行一个条目（exe 文件名或完整路径）：
 //! 空行与 `#` 开头的行忽略；比较键为路径末段并统一转小写（Windows 文件名不区分大小写）。
-//! 另提供原始行读写（lines / save_lines）与追加（add_entry），供悬浮窗「拉黑」按钮与
-//! 黑名单管理对话框使用；归一化只发生在 matches 比对，文件里保留用户写的原始形态。
+//! 另提供原始行读写（lines / save_lines），供黑名单管理对话框使用；
+//! 归一化只发生在 matches 比对，文件里保留用户写的原始形态。
 
 use std::path::PathBuf;
 
@@ -51,22 +51,6 @@ pub fn lines() -> Vec<String> {
     parse_lines(&content)
 }
 
-/// 追加一条黑名单（完整 exe 路径或文件名）：按归一化键判重，已存在返回 false 不写入；
-/// 成功追加返回 true。文件不存在则创建，读写失败按三级制记日志降级并返回 false。
-pub fn add_entry(exe_path: &str) -> bool {
-    let mut items = lines();
-    if !push_unique(&mut items, exe_path) {
-        return false;
-    }
-    match write(&render_lines(&items)) {
-        Ok(()) => true,
-        Err(e) => {
-            Log::log(&format!("blacklist save failed: {e}"));
-            false
-        }
-    }
-}
-
 /// 整文件重写（UTF-8 无 BOM、CRLF 换行）。写失败记日志降级，文件保持原内容。
 pub fn save_lines(lines: &[String]) {
     if let Err(e) = write(&render_lines(lines)) {
@@ -94,21 +78,9 @@ fn render_lines(lines: &[String]) -> String {
     out
 }
 
-/// 按归一化键判重后追加原始写法：已有同一 exe（大小写 / 完整路径与文件名写法不同均算同一，
-/// 注释行不算——见 is_same_app）或入参无文件名时返回 false 不追加；
-/// 写入前去掉首尾空白（读回时本就会被 trim）。
-fn push_unique(lines: &mut Vec<String>, exe_path: &str) -> bool {
-    let exe_path = exe_path.trim();
-    if exe_name(exe_path).is_empty() || lines.iter().any(|line| is_same_app(line, exe_path)) {
-        return false;
-    }
-    lines.push(exe_path.to_string());
-    true
-}
-
 /// 判断列表条目与给定 exe 路径是否为同一应用（末段 + 小写归一化）。
 /// `#` 注释行与无文件名的行不与任何应用判同——注释条目等于被禁用，命中（matches_content）
-/// 与判重（push_unique / 对话框「加入黑名单」按钮）共用这一语义，不会出现「注释了却仍算已拉黑」。
+/// 与对话框「加入黑名单」按钮共用这一语义，不会出现「注释了却仍算已拉黑」。
 /// 管理对话框据此判断「上次全屏应用」是否已在列表里（列表是编辑中的镜像，不是文件）。
 pub fn is_same_app(line: &str, exe_path: &str) -> bool {
     let line = line.trim();
@@ -185,25 +157,6 @@ mod tests {
         assert_eq!(text, "# 播放器\r\nC:\\Program Files\\DAUM\\PotPlayer\\PotPlayerMini64.exe\r\n");
         assert_eq!(parse_lines(&text), items);
         assert_eq!(render_lines(&[]), "");
-    }
-
-    #[test]
-    fn push_unique_compares_by_normalized_key() {
-        let mut items = vec!["C:\\Program Files\\DAUM\\PotPlayer\\PotPlayerMini64.exe".to_string()];
-        // 同键不同写法（文件名 / 大小写）不重复追加，条目保持用户原写法
-        assert!(!push_unique(&mut items, "potplayermini64.exe"));
-        assert!(!push_unique(&mut items, "POTPLAYERMINI64.EXE"));
-        assert_eq!(items.len(), 1);
-        // 新条目追加在既有注释行之后
-        let mut items = vec!["# 播放器".to_string(), "vlc.exe".to_string()];
-        assert!(push_unique(&mut items, "D:\\Tools\\mpv.exe"));
-        assert_eq!(items, vec!["# 播放器".to_string(), "vlc.exe".to_string(), "D:\\Tools\\mpv.exe".to_string()]);
-        // 无文件名的入参不产生空条目
-        assert!(!push_unique(&mut items, "  "));
-        // 注释行不判重：临时禁用（注释掉）的条目不阻止再次追加
-        let mut items = vec!["# D:\\Tools\\mpv.exe".to_string()];
-        assert!(push_unique(&mut items, "mpv.exe"));
-        assert_eq!(items, vec!["# D:\\Tools\\mpv.exe".to_string(), "mpv.exe".to_string()]);
     }
 
     #[test]
