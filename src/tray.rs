@@ -11,7 +11,7 @@
  */
 
 //! 系统托盘：优先加载 exe 内嵌图标（与文件图标同一设计源，见 src/icon.rs），
-//! 失败时回退到 GDI 绘制的表盘；右键弹出菜单【显示悬浮窗】【关于 TimeStick】【直接退出】。
+//! 失败时回退到 GDI 绘制的表盘；右键弹出菜单【显示悬浮窗】【黑名单管理】【关于】【直接退出】。
 
 use std::mem::size_of;
 use std::ptr::null_mut;
@@ -55,6 +55,7 @@ pub const TRAY_CMD_SIZE_XL: usize = 1012;
 pub const TRAY_CMD_COLOR_AUTO: usize = 1013;
 pub const TRAY_CMD_COLOR_WHITE: usize = 1014;
 pub const TRAY_CMD_COLOR_BLACK: usize = 1015;
+pub const TRAY_CMD_BLACKLIST: usize = 1016; // 黑名单管理对话框
 const TRAY_ID: u32 = 1;
 
 /// 托盘菜单勾选项快照：各项真源在各自模块（自启动真源是注册表），Tray 只接收当次值、不存副本
@@ -147,6 +148,7 @@ impl Tray {
                 return;
             };
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_SHOW, w!("显示悬浮窗"));
+            let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_BLACKLIST, w!("黑名单管理..."));
             // 单选组：当前项勾选。MF_RADIO 与 MF_BYPOSITION 同值（0x400），crate 未导出
             // 且该位会被按位置解释，故用 MF_CHECKED 标记当前项
             let checked = MENU_ITEM_FLAGS(MF_CHECKED.0);

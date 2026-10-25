@@ -13,7 +13,7 @@
 //! D2D/DWrite 渲染管线：将时间文字与按钮绘制到 32bpp ARGB 位图（每像素 Alpha），
 //! 再经 UpdateLayeredWindow 整体提交 —— 实现“半透明圆角背景 + 不透明文字”。
 //!
-//! 布局为单行：[时间] [图钉] [关闭]；鼠标未悬停时只画时间（水平居中），
+//! 布局为单行：[时间] [图钉] [拉黑] [关闭]；鼠标未悬停时只画时间（水平居中），
 //! 悬停时展开背景与按钮。渲染目标固定 DPI=96，布局坐标即物理像素（与鼠标热区一致）。
 
 use std::mem::size_of;
@@ -147,6 +147,8 @@ pub struct Renderer {
     seven_seg: bool,
     /// 图钉按钮热区（客户区坐标）
     pub btn_pin: RECT,
+    /// 拉黑按钮热区（客户区坐标）
+    pub btn_block: RECT,
     /// 关闭按钮热区（客户区坐标）
     pub btn_close: RECT,
 }
@@ -183,20 +185,22 @@ impl Renderer {
             (metrics.width.ceil(), metrics.height.ceil())
         };
 
-        // 单行布局：[时间] [图钉] [关闭]
+        // 单行布局：[时间] [图钉] [拉黑] [关闭]
         let pad_x = PAD_X * s;
         let pad_v = PAD_V * s;
         let btn_gap = BTN_GAP * s;
         // 按钮只放大不缩小：等比缩到 0.78 倍时仅 10.9px，低于可点击目标下限
         let btn = (BTN_SIZE * s).max(BTN_SIZE);
-        let w = (pad_x + text_w + btn_gap + btn + btn_gap + btn + pad_x).ceil() as i32;
+        let w = (pad_x + text_w + btn_gap + btn + btn_gap + btn + btn_gap + btn + pad_x).ceil() as i32;
         let h = (text_h.max(btn) + pad_v * 2.0).ceil() as i32;
         // 圆角不超过窗口半高，避免小档时圆角吃掉整个高度
         let corner = (CORNER_RADIUS * s).min(h as f32 / 2.0);
         let btn_y = ((h as f32 - btn) / 2.0).ceil() as i32;
         let x_pin = (pad_x + text_w + btn_gap).ceil() as i32;
-        let x_close = x_pin + btn as i32 + btn_gap as i32;
+        let x_block = x_pin + btn as i32 + btn_gap as i32;
+        let x_close = x_block + btn as i32 + btn_gap as i32;
         let btn_pin = RECT { left: x_pin, top: btn_y, right: x_pin + btn as i32, bottom: btn_y + btn as i32 };
+        let btn_block = RECT { left: x_block, top: btn_y, right: x_block + btn as i32, bottom: btn_y + btn as i32 };
         let btn_close = RECT { left: x_close, top: btn_y, right: x_close + btn as i32, bottom: btn_y + btn as i32 };
 
         // 32bpp 自顶向下 DIB：UpdateLayeredWindow 据此获取每像素 Alpha
@@ -267,6 +271,7 @@ impl Renderer {
             seg,
             seven_seg,
             btn_pin,
+            btn_block,
             btn_close,
         })
     }
@@ -275,7 +280,7 @@ impl Renderer {
     /// - 未悬停（hovering=false）：只画时间文字（水平居中），无背景无按钮 —— 纯文字悬浮
     /// - 悬停（hovering=true）：半透明圆角背景 + 时间（回到左侧）+ 按钮
     /// - 背景配色随背景亮度反色（深色背景黑底/浅色背景白底），固定模式悬停时加深作为提示
-    /// - 时间文字：深色背景白字/浅色背景黑字；按钮：非固定显示空心图钉 + 关闭 X，固定显示实心图钉（“即将解除”反馈）
+    /// - 时间文字：深色背景白字/浅色背景黑字；按钮：非固定显示空心图钉 + 拉黑 + 关闭 X，固定显示实心图钉（“即将解除”反馈）
     pub fn render(&self, time: &str, pinned: bool, hovering: bool, dark_bg: bool) {
         unsafe {
             let (w, h) = self.size;
@@ -328,6 +333,7 @@ impl Renderer {
                     self.draw_pin_filled(dark_bg);
                 } else {
                     self.draw_pin_hollow(dark_bg);
+                    self.draw_block(dark_bg);
                     self.draw_close(dark_bg);
                 }
             }
@@ -407,6 +413,30 @@ impl Renderer {
             self.rt.DrawLine(
                 Vector2 { X: cx, Y: cy + 3.5 * k },
                 Vector2 { X: cx, Y: cy + 6.0 * k },
+                brush,
+                1.2 * k,
+                None,
+            );
+        }
+    }
+
+    /// 拉黑（禁止符）图形：圆环 + 斜线 —— 点击把当前全屏应用加入黑名单
+    fn draw_block(&self, dark_bg: bool) {
+        let brush = if dark_bg { &self.brush_light } else { &self.brush_dark };
+        let (cx, cy) = self.btn_center(&self.btn_block);
+        let k = self.btn_scale;
+        // 斜线端点到圆心的分量取环半径 3.5k 的 1/√2，恰好落在环上
+        let d = 2.5 * k;
+        unsafe {
+            self.rt.DrawEllipse(
+                &D2D1_ELLIPSE { point: Vector2 { X: cx, Y: cy }, radiusX: 3.5 * k, radiusY: 3.5 * k },
+                brush,
+                1.2 * k,
+                None,
+            );
+            self.rt.DrawLine(
+                Vector2 { X: cx - d, Y: cy + d },
+                Vector2 { X: cx + d, Y: cy - d },
                 brush,
                 1.2 * k,
                 None,

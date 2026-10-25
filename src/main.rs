@@ -18,6 +18,8 @@
 
 mod about;
 mod autostart;
+mod blacklist;
+mod blacklist_edit;
 mod detect;
 mod floater;
 mod icon;
@@ -47,6 +49,8 @@ pub const WM_APP_TRAY: u32 = WM_APP + 1; // 托盘回调
 pub const WM_APP_FS: u32 = WM_APP + 2;   // 全屏状态变化，wparam: 1=进入 0=退出
 pub const WM_APP_EXIT: u32 = WM_APP + 3; // 请求退出
 pub const WM_APP_ABOUT_CLOSED: u32 = WM_APP + 4; // 关于对话框已销毁（无参数约定）
+pub const WM_APP_BLACKLIST_CLOSED: u32 = WM_APP + 5; // 黑名单管理对话框已销毁（无参数约定）
+pub const WM_APP_BLACKLIST_APP: u32 = WM_APP + 6; // 上次全屏应用更新，lparam: UTF-16 字符串指针（同线程 SendMessage，调用期间有效）
 
 pub const HOTKEY_ID: i32 = 1; // Ctrl+Alt+T：固定模式解除固定
 
@@ -61,6 +65,10 @@ struct App {
     hicon_sm: HICON,
     /// 关于对话框句柄（防重入；销毁经 WM_APP_ABOUT_CLOSED 清空）
     about_hwnd: Option<HWND>,
+    /// 黑名单管理对话框句柄（防重入；销毁经 WM_APP_BLACKLIST_CLOSED 清空）
+    blacklist_hwnd: Option<HWND>,
+    /// 上次进入全屏时前台应用的完整路径（对话框「加入黑名单」用；退出全屏不清空，下次进入覆盖）
+    last_fullscreen_exe: Option<String>,
     /// 开机自启动勾选状态（真源是注册表，此处仅作菜单显示缓存，见 src/autostart.rs）
     auto_start: bool,
 }
@@ -99,7 +107,7 @@ impl App {
             CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("TimeStick"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst), None)?
         };
         let tray = tray::Tray::new(main_hwnd)?;
-        Ok(App { main_hwnd, floater, tray, hicon, hicon_sm, about_hwnd: None, auto_start: autostart::is_enabled() })
+        Ok(App { main_hwnd, floater, tray, hicon, hicon_sm, about_hwnd: None, blacklist_hwnd: None, last_fullscreen_exe: None, auto_start: autostart::is_enabled() })
     }
 
     /// 从各真源收集当前偏好并持久化（切换生效后调用）。
@@ -157,6 +165,10 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                     tray::TRAY_CMD_SHOW => {
                         Log::log("tray: show floater");
                         app.floater.show();
+                    }
+                    tray::TRAY_CMD_BLACKLIST => {
+                        Log::log("tray: blacklist manager");
+                        blacklist_edit::show(&mut app.blacklist_hwnd, app.main_hwnd, app.last_fullscreen_exe.as_deref());
                     }
                     tray::TRAY_CMD_ABOUT => {
                         Log::log("tray: about");
@@ -237,6 +249,18 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             WM_APP_FS => {
                 if wparam.0 != 0 {
                     Log::log("fullscreen entered, showing floater");
+                    // 此刻前台仍是目标应用（悬浮窗以 SW_SHOWNOACTIVATE 显示，不夺前台）；
+                    // 托盘菜单与管理对话框都会抢前台，过后再查只能查到 timestick 自己；
+                    // 取不到时保留上次值，宁可显示旧值也不清空
+                    if let Some(exe) = detect::foreground_exe() {
+                        // 对话框开着时同步推一次：那一行是快照，不推就会一直显示旧值
+                        if let Some(dlg) = app.blacklist_hwnd {
+                            let mut buf: Vec<u16> = exe.encode_utf16().collect();
+                            buf.push(0);
+                            let _ = SendMessageW(dlg, WM_APP_BLACKLIST_APP, Some(WPARAM(0)), Some(LPARAM(buf.as_ptr() as isize)));
+                        }
+                        app.last_fullscreen_exe = Some(exe);
+                    }
                     app.floater.show();
                 } else {
                     Log::log("fullscreen exited, hiding floater");
@@ -250,6 +274,10 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             }
             WM_APP_ABOUT_CLOSED => {
                 app.about_hwnd = None;
+                LRESULT(0)
+            }
+            WM_APP_BLACKLIST_CLOSED => {
+                app.blacklist_hwnd = None;
                 LRESULT(0)
             }
             WM_DESTROY => {
