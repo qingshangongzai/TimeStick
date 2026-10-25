@@ -14,6 +14,8 @@
 //! 支持拖动、固定（鼠标穿透）、关闭（隐藏，后台继续常驻；托盘可随时唤回）。固定状态仅在本次运行内保留。
 //!
 //! 悬停展开：鼠标未悬停时仅显示居中时间（无背景无按钮），悬停时亮出背景与按钮。
+//! 按钮依次为图钉 / 拉黑 / 关闭：拉黑把当前全屏应用写入黑名单（见 blacklist.rs）后立即隐藏，
+//! 下次该应用全屏不再显示（隐藏的判定在 detect.rs）。
 //! 非固定模式由 WM_MOUSEMOVE/TrackMouseEvent 即时驱动；固定模式（鼠标穿透）收不到
 //! 鼠标消息，由 250ms 轮询驱动同一状态，兼作 1.5s 自动解除固定。
 //!
@@ -35,6 +37,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::blacklist;
+use crate::detect;
 use crate::log::Log;
 use crate::position;
 use crate::render::{self, Renderer};
@@ -607,11 +611,19 @@ impl Floater {
         let x = (lparam.0 & 0xffff) as i16 as i32;
         let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
         let p = POINT { x, y };
-        if pt_in_rect(&renderer.btn_pin, p) {
+        // 先取齐三个按钮的命中结果：命中后的处理要 &mut self，之后不能再借 renderer
+        let hit_pin = pt_in_rect(&renderer.btn_pin, p);
+        let hit_block = pt_in_rect(&renderer.btn_block, p);
+        let hit_close = pt_in_rect(&renderer.btn_close, p);
+        if hit_pin {
             self.set_pinned(true);
             return;
         }
-        if pt_in_rect(&renderer.btn_close, p) {
+        if hit_block {
+            self.block_foreground();
+            return;
+        }
+        if hit_close {
             self.hide();
             return;
         }
@@ -625,6 +637,22 @@ impl Floater {
             self.drag_start = cur;
             self.win_pos_at_drag = POINT { x: wr.left, y: wr.top };
             SetCapture(hwnd);
+        }
+    }
+
+    /// 拉黑当前前台应用：取前台进程完整路径 → 追加进黑名单 → 立即隐藏（与点击 X 同一路径）。
+    /// 点击本窗口不夺前台（WS_EX_NOACTIVATE），此刻 GetForegroundWindow 仍指向底下的全屏应用。
+    /// 取不到进程名或写入失败时不写文件、不隐藏——悬浮窗仍在即是「未生效」的信号。
+    fn block_foreground(&mut self) {
+        let Some(exe) = detect::foreground_exe() else {
+            Log::log("blacklist add failed");
+            return;
+        };
+        if blacklist::add_entry(&exe) {
+            Log::log(&format!("blacklist added: {exe}"));
+            self.hide();
+        } else {
+            Log::log("blacklist add failed");
         }
     }
 
