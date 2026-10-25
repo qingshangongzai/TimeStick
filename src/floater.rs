@@ -27,7 +27,7 @@ use std::mem::size_of;
 use windows::core::{w, PCWSTR, Result};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    GetDC, GetMonitorInfoW, GetPixel, MonitorFromWindow, ReleaseDC, HBRUSH, MONITORINFO,
+    GetDC, GetMonitorInfoW, GetPixel, MonitorFromPoint, MonitorFromWindow, ReleaseDC, HBRUSH, MONITORINFO,
     MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -82,6 +82,10 @@ pub struct Floater {
     dark_bg: bool,
     /// 显示配色模式；勾选状态唯一真源，托盘每次弹菜单时读取
     color_mode: settings::ColorMode,
+    /// 位置模式：0=记忆（pos 会话记忆 + position.txt），1-9=九宫格格位（行优先）；勾选状态唯一真源，托盘菜单每次弹出时读取
+    position_mode: u8,
+    /// 九宫格绑定的显示器设备名（position_mode=0 时不读；空=未绑定，show 时回退主屏）
+    position_monitor: String,
     /// 当前窗口左上角位置（会话内记忆，拖动后更新）
     pos: Option<POINT>,
     dragging: bool,
@@ -106,6 +110,8 @@ impl Floater {
             size_level: render::SIZE_LEVEL_DEFAULT,
             dark_bg: true,
             color_mode: settings::ColorMode::Auto,
+            position_mode: 0,
+            position_monitor: String::new(),
             pos: None,
             dragging: false,
             drag_start: POINT::default(),
@@ -131,6 +137,78 @@ impl Floater {
     /// 当前显示配色模式（供托盘菜单勾选状态；真源唯一，Tray 不存副本）。
     pub fn color_mode(&self) -> settings::ColorMode {
         self.color_mode
+    }
+
+    /// 当前位置模式（供托盘菜单勾选状态；真源唯一，Tray 不存副本）。
+    pub fn position_mode(&self) -> u8 {
+        self.position_mode
+    }
+
+    /// 由自身全部 6 个偏好字段构造设置快照（main.rs 持久化用）。
+    pub fn settings(&self) -> settings::Settings {
+        settings::Settings {
+            show_seconds: self.show_seconds,
+            seven_seg: self.seven_seg,
+            size_level: self.size_level,
+            color_mode: self.color_mode,
+            position_mode: self.position_mode,
+            position_monitor: self.position_monitor.clone(),
+        }
+    }
+
+    /// 启动时恢复位置模式（窗口必未创建，仅赋值两个字段；mode 合法性由 settings::parse 保证）。
+    pub fn restore_position(&mut self, mode: u8, monitor: &str) {
+        self.position_mode = mode;
+        self.position_monitor = monitor.to_string();
+    }
+
+    /// 切换位置模式（托盘菜单）：0=记忆，1-9=九宫格。
+    /// 可见时立即移窗；隐藏时只更新字段与绑定屏，下次 show() 重算。持久化由调用方负责（无失败路径，切完即存）。
+    pub fn set_position_mode(&mut self, mode: u8) {
+        if self.position_mode == mode {
+            return;
+        }
+        // 九宫格捕获绑定屏：窗口可见取窗口所在屏；隐藏（窗口已销毁）取光标所在屏
+        if mode != 0 {
+            let mon = match self.hwnd {
+                Some(hwnd) => unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) },
+                None => unsafe {
+                    let mut cur = POINT::default();
+                    let _ = GetCursorPos(&mut cur);
+                    MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST)
+                },
+            };
+            // 捕获失败记日志保持旧绑定（show 时经 resolve_monitor 回退主屏）
+            if let Some(name) = position::device_name(mon) {
+                self.position_monitor = name;
+            } else {
+                Log::log("position monitor capture failed, keep previous");
+            }
+        }
+        self.position_mode = mode;
+        // 隐藏：窗口与渲染器已销毁（见 hide()），目标位无尺寸来源；下次 show() 按新模式重算
+        let Some(hwnd) = self.hwnd else {
+            self.pos = None;
+            Log::log(&format!("position mode: {mode}"));
+            return;
+        };
+        // 可见：立即移窗。hwnd 与 renderer 同生共死（recreate() 既有注释），unwrap 属不变量必达点豁免
+        let size = self.renderer.as_ref().unwrap().size;
+        let target = if mode == 0 {
+            // 切回记忆：移回 position.txt 记录位；无记录 → 主屏右下角默认位
+            position::load(size).unwrap_or_else(|| self.default_pos())
+        } else {
+            // 九宫格：按刚捕获的绑定屏算格位，与 show() 同一口径（捕获失败保持旧绑定时两处不分裂）；解析失败回退默认位
+            position::resolve_monitor(&self.position_monitor)
+                .map_or_else(|| self.default_pos(), |r| position::grid_point(r, mode, size))
+        };
+        self.pos = Some(target);
+        // 换位后背景可能已变：立即采一次（固定色模式不读屏）
+        if self.color_mode == settings::ColorMode::Auto {
+            self.sample_background(hwnd);
+        }
+        self.render_now(hwnd); // present 的 UpdateLayeredWindow 自带移窗
+        Log::log(&format!("position mode: {mode}"));
     }
 
     /// 切换时间格式（HH:MM ↔ HH:MM:SS）。
@@ -224,6 +302,12 @@ impl Floater {
                 let mut pos = self.pos.unwrap_or(POINT { x: 0, y: 0 });
                 pos.x -= (w - old_size.0) / 2;
                 pos.y -= (h - old_size.1) / 2;
+                // 九宫格：按格位 + 新尺寸重算（绑定屏），窗口钉在格位不随尺寸变化漂移；解析失败退回上方中心锚点
+                if self.position_mode != 0
+                    && let Some(r) = position::resolve_monitor(&self.position_monitor)
+                {
+                    pos = position::grid_point(r, self.position_mode, (w, h));
+                }
                 unsafe {
                     let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                     let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
@@ -299,12 +383,16 @@ impl Floater {
             return;
         }
         self.visible = true;
-        // 首次显示：恢复上次会话位置；无记录或换算失败 → 默认主屏右下角
-        let pos = self.pos.unwrap_or_else(|| {
-            // ensure_created 刚成功，renderer 必为 Some（规范豁免的 unwrap 点）
-            let size = self.renderer.as_ref().unwrap().size;
-            position::load(size).unwrap_or_else(|| self.default_pos())
-        });
+        // ensure_created 刚成功，renderer 必为 Some（规范豁免的 unwrap 点）
+        let size = self.renderer.as_ref().unwrap().size;
+        // 位置来源按模式分支：记忆 = 会话记忆优先（首次走 position.txt，无记录 → 主屏右下角）；
+        // 九宫格 = 每次显示重算（不用会话记忆），覆盖隐藏期切格位与分辨率/显示器变化
+        let pos = if self.position_mode == 0 {
+            self.pos.unwrap_or_else(|| position::load(size).unwrap_or_else(|| self.default_pos()))
+        } else {
+            position::resolve_monitor(&self.position_monitor)
+                .map_or_else(|| self.default_pos(), |r| position::grid_point(r, self.position_mode, size))
+        };
         self.pos = Some(pos);
         Log::log(&format!("floater shown at ({}, {})", pos.x, pos.y));
         let hwnd = self.hwnd.unwrap();
@@ -489,7 +577,7 @@ impl Floater {
         unsafe {
             let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
             let mon = MonitorFromWindow(HWND::default(), MONITOR_DEFAULTTOPRIMARY);
-            // 仅 show() 在 ensure_created 成功后调用，renderer 必为 Some（规范豁免的 unwrap 点）
+            // 仅 show() 与 set_position_mode 可见分支调用，两者均保证 renderer 已创建（规范豁免的 unwrap 点）
             let (w, h) = self.renderer.as_ref().unwrap().size;
             if GetMonitorInfoW(mon, &mut mi).as_bool() {
                 let m = mi.rcMonitor;
@@ -626,6 +714,12 @@ impl Floater {
         if hit_close {
             self.hide();
             return;
+        }
+        // 九宫格下拖动 = 切回记忆模式：模式切换即刻持久化；拖完照常写 position.txt
+        if self.position_mode != 0 {
+            self.position_mode = 0;
+            settings::save(&self.settings());
+            Log::log("drag: back to memory mode");
         }
         // 其余区域：开始拖动
         unsafe {

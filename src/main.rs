@@ -85,6 +85,7 @@ impl App {
         let _ = floater.set_seven_seg(pref.seven_seg);
         let _ = floater.set_size_level(pref.size_level);
         floater.set_color_mode(pref.color_mode);
+        floater.restore_position(pref.position_mode, &pref.position_monitor);
 
         // 隐藏主窗口：承载托盘回调、全局热键与全屏消息
         let class = w!("TimeStickMain");
@@ -112,12 +113,7 @@ impl App {
 
     /// 从各真源收集当前偏好并持久化（切换生效后调用）。
     fn save_prefs(&self) {
-        settings::save(&settings::Settings {
-            show_seconds: self.floater.show_seconds(),
-            seven_seg: self.floater.seven_seg(),
-            size_level: self.floater.size_level(),
-            color_mode: self.floater.color_mode(),
-        });
+        settings::save(&self.floater.settings());
     }
 
     fn request_exit(&mut self) {
@@ -155,6 +151,7 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                     seven_seg: app.floater.seven_seg(),
                     size_level: app.floater.size_level(),
                     color_mode: app.floater.color_mode(),
+                    position_mode: app.floater.position_mode(),
                     auto_start: app.auto_start,
                 });
                 LRESULT(0)
@@ -224,6 +221,13 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                     tray::TRAY_CMD_COLOR_BLACK => {
                         Log::log("tray: color black");
                         app.floater.set_color_mode(settings::ColorMode::Black);
+                        app.save_prefs();
+                    }
+                    // 位置模式 = 命令 ID 区间算出（ID 连续，起点为记忆，见 tray.rs）；
+                    // 纯字段/移窗切换无失败路径，切换后直接持久化（日志由 set_position_mode 内记）
+                    tray::TRAY_CMD_POS_MEMORY..=tray::TRAY_CMD_POS_BR => {
+                        let mode = (id - tray::TRAY_CMD_POS_MEMORY) as u8;
+                        app.floater.set_position_mode(mode);
                         app.save_prefs();
                     }
                     tray::TRAY_CMD_AUTO_START => {
