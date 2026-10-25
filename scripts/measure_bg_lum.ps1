@@ -211,6 +211,9 @@ try {
                 $sceneIndex = $idx
                 if ($sceneBmp) { $sceneBmp.Dispose() }
                 $sceneBmp = New-SceneBitmap $scenes[$idx] $screenW $screenH
+                # WinForms 画 BackgroundImage 前先用 BackColor 擦背景：底色取新场景左上角像素，
+                # 否则默认浅灰(240)会在每次切场景时闪成"亮背景"，被反色采样当成一次真翻转
+                $form.BackColor = $sceneBmp.GetPixel(0, 0)
                 $form.BackgroundImage = $sceneBmp
                 $form.Refresh()
                 Write-Host ("场景切换 → {0}" -f $scenes[$idx])
