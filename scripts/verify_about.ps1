@@ -1,6 +1,6 @@
 ﻿# TimeStick 关于对话框验证脚本（阶段三：打开/防重入/许可文本/关闭/重开；阶段四：关闭按钮存在 + 无边框客户区=整窗）
 $ErrorActionPreference = "Continue"
-$exe = "D:\青山公仔\应用\Code\TimeStick\target\release\timestick.exe"
+$exe = Join-Path $PSScriptRoot "..\target\release\timestick.exe"
 $log = "$env:TEMP\timestick_about.log"
 Remove-Item $log -ErrorAction SilentlyContinue
 
@@ -52,7 +52,7 @@ function Count-AboutWindows {
 }
 
 Write-Host "=== 0. cargo build --release ==="
-Push-Location "D:\青山公仔\应用\Code\TimeStick"
+Push-Location (Join-Path $PSScriptRoot "..")
 cargo build --release
 $buildOk = ($LASTEXITCODE -eq 0)
 Pop-Location

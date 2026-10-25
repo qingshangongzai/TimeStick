@@ -140,7 +140,7 @@ fn is_blacklisted() -> bool {
 
 /// 取前台根窗口所属进程的完整 exe 路径；无前台窗口 / 进程查询被拒 / 路径超长 → None。
 /// 取窗口径与 is_fullscreen 一致（GetAncestor GA_ROOT），UWP 宿主窗口同样适用。
-/// 跨模块调用：悬浮窗「拉黑」按钮在主线程调用（WS_EX_NOACTIVATE 窗口点击不夺前台）。
+/// 跨模块调用：主线程在进入全屏时取一次，作为管理对话框「上次全屏应用」的快照来源。
 pub fn foreground_exe() -> Option<String> {
     unsafe {
         let fg = GetForegroundWindow();

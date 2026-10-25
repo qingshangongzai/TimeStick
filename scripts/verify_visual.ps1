@@ -4,6 +4,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $log = "$env:TEMP\timestick_shot.log"
 $shot = "$env:TEMP\timestick_shot.png"
+$exe = Join-Path $PSScriptRoot "..\target\release\timestick.exe"
 Remove-Item $log, $shot -ErrorAction SilentlyContinue
 
 Add-Type @"
@@ -50,7 +51,7 @@ public class Shot2 {
 Stop-Process -Name timestick -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 $env:TIMESTICK_LOG = $log
-$p = Start-Process -FilePath "D:\青山公仔\应用\Code\TimeStick\target\release\timestick.exe" -PassThru
+$p = Start-Process -FilePath $exe -PassThru
 Start-Sleep -Seconds 1
 
 [Shot2]::ShowFs() | Out-Null
