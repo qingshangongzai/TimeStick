@@ -10,15 +10,28 @@
  * See the Mulan PSL v2 for more details.
  */
 
-//! 设置持久化：跨重启记忆用户偏好（时间格式 + 显示风格 + 显示大小档位）。
+//! 设置持久化：跨重启记忆用户偏好（时间格式 + 显示风格 + 显示大小档位 + 显示配色）。
 //! 存 %APPDATA%\TimeStick\settings.txt，逐行 `key=value`：
-//! `show_seconds=1/0`、`seven_seg=1/0`、`size_level=0..4`；缺键/坏行回退默认值，写入失败仅记日志降级。
+//! `show_seconds=1/0`、`seven_seg=1/0`、`size_level=0..4`、`color_mode=auto|white|black`；
+//! 缺键/坏行回退默认值，写入失败仅记日志降级。
 
 use std::path::PathBuf;
 
 use crate::log::Log;
 
 const CFG_FILE: &str = "settings.txt";
+
+/// 显示配色模式；`Default` 为自动反色（按背景亮度判定）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorMode {
+    /// 按背景亮度自动反色
+    #[default]
+    Auto,
+    /// 常驻白色文字（深色底配色）
+    White,
+    /// 常驻黑色文字（浅色底配色）
+    Black,
+}
 
 /// 可持久化的用户偏好；`Default` 即「未设置」时的行为。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,12 +42,19 @@ pub struct Settings {
     pub seven_seg: bool,
     /// 显示大小档位索引（render::FONT_LEVELS 下标）
     pub size_level: u8,
+    /// 显示配色模式（自动反色 / 常驻白色 / 常驻黑色）
+    pub color_mode: ColorMode,
 }
 
 // 档位默认取小档（18px）而非 0，故手写 Default 而不用 derive
 impl Default for Settings {
     fn default() -> Self {
-        Self { show_seconds: false, seven_seg: false, size_level: crate::render::SIZE_LEVEL_DEFAULT }
+        Self {
+            show_seconds: false,
+            seven_seg: false,
+            size_level: crate::render::SIZE_LEVEL_DEFAULT,
+            color_mode: ColorMode::Auto,
+        }
     }
 }
 
@@ -52,10 +72,15 @@ pub fn save(s: &Settings) {
         let _ = std::fs::create_dir_all(dir);
     }
     let content = format!(
-        "show_seconds={}\nseven_seg={}\nsize_level={}\n",
+        "show_seconds={}\nseven_seg={}\nsize_level={}\ncolor_mode={}\n",
         if s.show_seconds { 1 } else { 0 },
         if s.seven_seg { 1 } else { 0 },
         s.size_level,
+        match s.color_mode {
+            ColorMode::Auto => "auto",
+            ColorMode::White => "white",
+            ColorMode::Black => "black",
+        },
     );
     match std::fs::write(&path, &content) {
         Ok(_) => Log::log(&format!("settings saved: {}", content.trim())),
@@ -83,6 +108,10 @@ fn parse(content: &str) -> Settings {
                 Ok(n) if (n as usize) < crate::render::FONT_LEVELS.len() => s.size_level = n,
                 _ => {}
             },
+            // 配色模式值取文字颜色语义；非法值 / 空值落入下面的兜底忽略，保持默认自动反色
+            (Some("color_mode"), Some("auto")) => s.color_mode = ColorMode::Auto,
+            (Some("color_mode"), Some("white")) => s.color_mode = ColorMode::White,
+            (Some("color_mode"), Some("black")) => s.color_mode = ColorMode::Black,
             _ => {} // 未知键 / 坏行：忽略
         }
     }
@@ -96,16 +125,16 @@ mod tests {
     #[test]
     fn parse_all_keys() {
         let s = parse("show_seconds=1\nseven_seg=1\nsize_level=3\n");
-        assert_eq!(s, Settings { show_seconds: true, seven_seg: true, size_level: 3 });
+        assert_eq!(s, Settings { show_seconds: true, seven_seg: true, size_level: 3, color_mode: ColorMode::Auto });
         let s = parse("show_seconds=0\nseven_seg=0\nsize_level=0\n");
-        assert_eq!(s, Settings { show_seconds: false, seven_seg: false, size_level: 0 });
+        assert_eq!(s, Settings { show_seconds: false, seven_seg: false, size_level: 0, color_mode: ColorMode::Auto });
     }
 
     #[test]
     fn parse_missing_keys_fall_back_to_default() {
         assert_eq!(parse(""), Settings::default());
         let s = parse("seven_seg=1\n");
-        assert_eq!(s, Settings { show_seconds: false, seven_seg: true, size_level: crate::render::SIZE_LEVEL_DEFAULT });
+        assert_eq!(s, Settings { show_seconds: false, seven_seg: true, size_level: crate::render::SIZE_LEVEL_DEFAULT, color_mode: ColorMode::Auto });
         // 缺省 size_level → 小档（非 0）
         assert_eq!(parse("show_seconds=1\n").size_level, crate::render::SIZE_LEVEL_DEFAULT);
     }
@@ -114,11 +143,11 @@ mod tests {
     fn parse_ignores_bad_lines() {
         // 坏值 / 未知键 / 格式不符的行忽略，其余键照常解析
         let s = parse("show_seconds=2\nseven_seg=1\nshow_seconds=1 extra\nbogus=1\n");
-        assert_eq!(s, Settings { show_seconds: false, seven_seg: true, size_level: crate::render::SIZE_LEVEL_DEFAULT });
+        assert_eq!(s, Settings { show_seconds: false, seven_seg: true, size_level: crate::render::SIZE_LEVEL_DEFAULT, color_mode: ColorMode::Auto });
         let s = parse("show_seconds=1\nseven_seg=5\n");
-        assert_eq!(s, Settings { show_seconds: true, seven_seg: false, size_level: crate::render::SIZE_LEVEL_DEFAULT });
+        assert_eq!(s, Settings { show_seconds: true, seven_seg: false, size_level: crate::render::SIZE_LEVEL_DEFAULT, color_mode: ColorMode::Auto });
         let s = parse("show_seconds = 1\nseven_seg=1\n");
-        assert_eq!(s, Settings { seven_seg: true, show_seconds: false, size_level: crate::render::SIZE_LEVEL_DEFAULT });
+        assert_eq!(s, Settings { seven_seg: true, show_seconds: false, size_level: crate::render::SIZE_LEVEL_DEFAULT, color_mode: ColorMode::Auto });
     }
 
     #[test]
@@ -143,11 +172,22 @@ mod tests {
     fn parse_size_level_mixes_with_other_keys() {
         // 与其它键混合解析：坏档位不影响其余键
         let s = parse("show_seconds=1\nsize_level=9\nseven_seg=1\n");
-        assert_eq!(s, Settings { show_seconds: true, seven_seg: true, size_level: crate::render::SIZE_LEVEL_DEFAULT });
+        assert_eq!(s, Settings { show_seconds: true, seven_seg: true, size_level: crate::render::SIZE_LEVEL_DEFAULT, color_mode: ColorMode::Auto });
         let s = parse("size_level=2\nshow_seconds=1\nseven_seg=0\n");
-        assert_eq!(s, Settings { show_seconds: true, seven_seg: false, size_level: 2 });
+        assert_eq!(s, Settings { show_seconds: true, seven_seg: false, size_level: 2, color_mode: ColorMode::Auto });
         // 末档（特大，索引 = 档数 - 1）合法
         let last = (crate::render::FONT_LEVELS.len() - 1) as u8;
         assert_eq!(parse(&format!("size_level={last}\n")).size_level, last);
+    }
+
+    #[test]
+    fn parse_color_mode_all_values() {
+        assert_eq!(parse("color_mode=auto\n").color_mode, ColorMode::Auto);
+        assert_eq!(parse("color_mode=white\n").color_mode, ColorMode::White);
+        assert_eq!(parse("color_mode=black\n").color_mode, ColorMode::Black);
+        // 非法值 / 空值 / 缺键回退 Auto
+        assert_eq!(parse("color_mode=light\n").color_mode, ColorMode::Auto);
+        assert_eq!(parse("color_mode=\n").color_mode, ColorMode::Auto);
+        assert_eq!(parse("").color_mode, ColorMode::Auto);
     }
 }

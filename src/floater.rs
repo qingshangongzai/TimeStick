@@ -38,6 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::log::Log;
 use crate::position;
 use crate::render::{self, Renderer};
+use crate::settings;
 
 const ID_TIMER: usize = 1; // 时间刷新（每次触发后按距下次显示变化的毫秒数重排）
 const ID_HOVER: usize = 2; // 固定模式悬停检测（250ms）
@@ -75,6 +76,8 @@ pub struct Floater {
     size_level: u8,
     /// 背景亮度判定缓存（仅 `sample_background` 写入）；构造 `true`，与"采样失败按暗处理"一致
     dark_bg: bool,
+    /// 显示配色模式；勾选状态唯一真源，托盘每次弹菜单时读取
+    color_mode: settings::ColorMode,
     /// 当前窗口左上角位置（会话内记忆，拖动后更新）
     pos: Option<POINT>,
     dragging: bool,
@@ -98,6 +101,7 @@ impl Floater {
             seven_seg: false,
             size_level: render::SIZE_LEVEL_DEFAULT,
             dark_bg: true,
+            color_mode: settings::ColorMode::Auto,
             pos: None,
             dragging: false,
             drag_start: POINT::default(),
@@ -118,6 +122,11 @@ impl Floater {
     /// 当前是否七段数码管风格（供托盘菜单勾选状态；真源唯一，Tray 不存副本）。
     pub fn seven_seg(&self) -> bool {
         self.seven_seg
+    }
+
+    /// 当前显示配色模式（供托盘菜单勾选状态；真源唯一，Tray 不存副本）。
+    pub fn color_mode(&self) -> settings::ColorMode {
+        self.color_mode
     }
 
     /// 切换时间格式（HH:MM ↔ HH:MM:SS）。
@@ -171,6 +180,25 @@ impl Floater {
         } else {
             true
         }
+    }
+
+    /// 切换显示配色：仅重绘，不重建渲染器；切到自动时恢复采样定时器。
+    /// 固定色模式停掉 `ID_BG`：不再读屏（HDR / 独占全屏下的 `GetPixel` 盲区随之绕过）。
+    pub fn set_color_mode(&mut self, mode: settings::ColorMode) {
+        if self.color_mode == mode {
+            return;
+        }
+        self.color_mode = mode;
+        // 窗口未建：只改字段，show() 时按新模式生效
+        let Some(hwnd) = self.hwnd else { return };
+        if mode == settings::ColorMode::Auto {
+            unsafe { SetTimer(Some(hwnd), ID_BG, BG_TICK_MS, None); }
+            // 立即定色，不等下一次 ID_BG；随后统一重绘，故忽略返回值
+            self.sample_background(hwnd);
+        } else {
+            unsafe { let _ = KillTimer(Some(hwnd), ID_BG); }
+        }
+        self.render_now(hwnd);
     }
 
     /// 按当前 show_seconds/seven_seg/size_level 重建渲染器并适配窗口（三个 setter 共用）。
@@ -282,14 +310,17 @@ impl Floater {
         }
         self.render_now(hwnd);
         // 窗口在 ensure_created 建于 (0,0)，须等上面 present 的 UpdateLayeredWindow 移到目标位置后再首采；
-        // 首帧沿用旧判定，采样翻转才补一帧（代价 ≤1 次额外绘制）
-        if self.sample_background(hwnd) {
+        // 首帧沿用旧判定，采样翻转才补一帧（代价 ≤1 次额外绘制）。固定色模式不读屏也不起定时器，
+        // 否则 bright 场景会白记一条 bg flip。
+        if self.color_mode == settings::ColorMode::Auto && self.sample_background(hwnd) {
             self.render_now(hwnd);
         }
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             SetTimer(Some(hwnd), ID_TIMER, 1000, None); // 每秒刷新时间
-            SetTimer(Some(hwnd), ID_BG, BG_TICK_MS, None); // 背景采样与时间刷新解耦
+            if self.color_mode == settings::ColorMode::Auto {
+                SetTimer(Some(hwnd), ID_BG, BG_TICK_MS, None); // 背景采样与时间刷新解耦；固定色模式不读屏
+            }
             // hide() 会杀掉 ID_HOVER；固定状态跨全屏会话保留，须按 pinned 恢复，
             // 否则悬停 1.5s 自动解除固定与固定模式悬停展开反馈永久失效
             if self.pinned {
@@ -465,10 +496,19 @@ impl Floater {
         }
     }
 
+    /// 折算给渲染层的背景判定：固定色模式忽略采样结果（自动=采样、常驻白=`true`、常驻黑=`false`）。
+    fn effective_dark_bg(&self) -> bool {
+        match self.color_mode {
+            settings::ColorMode::Auto => self.dark_bg,
+            settings::ColorMode::White => true,
+            settings::ColorMode::Black => false,
+        }
+    }
+
     fn render_now(&self, hwnd: HWND) {
         let Some(renderer) = &self.renderer else { return };
         let t = if self.show_seconds { now_hms() } else { now_hhmm() };
-        renderer.render(&t, self.pinned, self.hovering, self.dark_bg);
+        renderer.render(&t, self.pinned, self.hovering, self.effective_dark_bg());
         let pos = self.pos.unwrap_or(POINT { x: 0, y: 0 });
         renderer.present(hwnd, pos);
     }
@@ -617,8 +657,8 @@ impl Floater {
                 self.hover_ms = 0;
                 self.render_now(hwnd);
             }
-            // 换位后背景可能已变：立即采一次，不等下一次 ID_BG
-            if self.sample_background(hwnd) {
+            // 换位后背景可能已变：立即采一次，不等下一次 ID_BG（固定色模式不读屏）
+            if self.color_mode == settings::ColorMode::Auto && self.sample_background(hwnd) {
                 self.render_now(hwnd);
             }
             // 拖动结束：持久化当前大致位置（跨重启恢复，见 position.rs）
