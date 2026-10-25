@@ -76,6 +76,7 @@ impl App {
         let _ = floater.set_show_seconds(pref.show_seconds);
         let _ = floater.set_seven_seg(pref.seven_seg);
         let _ = floater.set_size_level(pref.size_level);
+        floater.set_color_mode(pref.color_mode);
 
         // 隐藏主窗口：承载托盘回调、全局热键与全屏消息
         let class = w!("TimeStickMain");
@@ -107,6 +108,7 @@ impl App {
             show_seconds: self.floater.show_seconds(),
             seven_seg: self.floater.seven_seg(),
             size_level: self.floater.size_level(),
+            color_mode: self.floater.color_mode(),
         });
     }
 
@@ -140,7 +142,13 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         let app = &mut *app_ptr;
         match msg {
             WM_APP_TRAY => {
-                app.tray.on_message(lparam, app.floater.show_seconds(), app.floater.seven_seg(), app.floater.size_level(), app.auto_start);
+                app.tray.on_message(lparam, &tray::MenuState {
+                    show_seconds: app.floater.show_seconds(),
+                    seven_seg: app.floater.seven_seg(),
+                    size_level: app.floater.size_level(),
+                    color_mode: app.floater.color_mode(),
+                    auto_start: app.auto_start,
+                });
                 LRESULT(0)
             }
             WM_COMMAND => {
@@ -189,6 +197,22 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                         if app.floater.set_size_level(level) {
                             app.save_prefs();
                         }
+                    }
+                    // 配色模式为纯字段切换、无失败路径（不重建渲染器），切换后直接持久化
+                    tray::TRAY_CMD_COLOR_AUTO => {
+                        Log::log("tray: color auto");
+                        app.floater.set_color_mode(settings::ColorMode::Auto);
+                        app.save_prefs();
+                    }
+                    tray::TRAY_CMD_COLOR_WHITE => {
+                        Log::log("tray: color white");
+                        app.floater.set_color_mode(settings::ColorMode::White);
+                        app.save_prefs();
+                    }
+                    tray::TRAY_CMD_COLOR_BLACK => {
+                        Log::log("tray: color black");
+                        app.floater.set_color_mode(settings::ColorMode::Black);
+                        app.save_prefs();
                     }
                     tray::TRAY_CMD_AUTO_START => {
                         Log::log(if app.auto_start { "tray: disable auto-start" } else { "tray: enable auto-start" });

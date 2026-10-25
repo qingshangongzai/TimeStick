@@ -32,12 +32,13 @@ impl Log {
     pub fn log(msg: &str) {
         let guard = LOG_PATH.lock().unwrap();
         let Some(path) = guard.as_ref() else { return };
-        let secs = SystemTime::now()
+        // 毫秒精度：≤500ms 的时序断言（如 bg flip）需要，秒级 ±1s 无法断言
+        let ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
+            .map(|d| d.as_millis())
             .unwrap_or(0);
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(f, "[{}] {msg}", secs);
+            let _ = writeln!(f, "[{ms}] {msg}");
         }
     }
 }
