@@ -4,13 +4,7 @@
 本项目（时间贴 / TimeStick）使用了以下第三方开源软件。
 下文按库逐一列出其版权信息、项目地址及所适用的开源许可证全文。
 
-本项目为纯 Rust + Win32 实现，第三方依赖极少：运行时仅依赖 microsoft/windows-rs
-系列 Win32 API 绑定 crate（第 1 - 3 条）；构建期使用 winres 嵌入图标资源及其
-构建链依赖（第 4 - 7 条，均不进入最终 exe）。各条目版本与 Cargo.lock 锁定
-版本一致，版权与许可证信息依据各 crate 随源码发布的许可证原文核对，
-并已对照 GitHub 上游仓库（microsoft/windows-rs、mxre/winres、toml-rs/toml、
-serde-rs/serde、dtolnay 系列）及 crates.io 版本元数据逐一核实。
-
+本项目为纯 Rust + Win32 实现，第三方依赖极少：运行时仅依赖 microsoft/windows-rs 系列 Win32 API 绑定 crate（第 1 - 3 条）；构建期使用 winres 嵌入图标资源及其构建链依赖（第 4 - 7 条，均不进入最终 exe）。各条目版本与 Cargo.lock 锁定版本一致，版权与许可证信息依据各 crate 随源码发布的许可证原文核对，并已对照 GitHub 上游仓库（microsoft/windows-rs、mxre/winres、toml-rs/toml、serde-rs/serde、dtolnay 系列）及 crates.io 版本元数据逐一核实。
 
 ================================================================================
 1.windows（Rust crate，运行时直接依赖）
@@ -224,7 +218,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE
 
-
 ================================================================================
 2.windows-numerics（Rust crate，运行时直接依赖）
 ================================================================================
@@ -437,14 +430,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE
 
-
 ================================================================================
 3.windows-rs 系列关联 crate（Rust crate，传递依赖）
 ================================================================================
 
-   包含：windows-core 0.62.2、windows-link 0.2.1、windows-result 0.4.1、
-         windows-strings 0.5.1、windows-threading 0.2.1、windows-collections 0.3.2、
-         windows-future 0.3.2、windows-implement 0.60.2、windows-interface 0.59.3
+   包含：windows-core 0.62.2、windows-link 0.2.1、windows-result 0.4.1、windows-strings 0.5.1、windows-threading 0.2.1、windows-collections 0.3.2、windows-future 0.3.2、windows-implement 0.60.2、windows-interface 0.59.3
    版权所有：Copyright (c) Microsoft Corporation.
    项目地址：https://github.com/microsoft/windows-rs
    许可证：Apache License 2.0 或 MIT License（二选一）
@@ -652,7 +642,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE
 
-
 ================================================================================
 4.winres（Rust crate，构建期依赖）
 ================================================================================
@@ -685,7 +674,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
 
 ================================================================================
 5.toml（Rust crate，构建期传递依赖，经 winres 引入）
@@ -899,7 +887,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-
 ================================================================================
 6.serde 系列（Rust crate，构建期传递依赖，经 toml 引入）
 ================================================================================
@@ -1112,17 +1099,14 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-
 ================================================================================
 7.过程宏辅助 crate（Rust crate，构建期传递依赖）
 ================================================================================
 
    包含：proc-macro2 1.0.107、quote 1.0.47、syn 2.0.119、syn 3.0.3、unicode-ident 1.0.24
    版权所有：David Tolnay
-   项目地址：https://github.com/dtolnay/proc-macro2、https://github.com/dtolnay/quote、
-             https://github.com/dtolnay/syn、https://github.com/dtolnay/unicode-ident
-   许可证：Apache License 2.0 或 MIT License（二选一）；
-           其中 unicode-ident 另适用 Unicode License v3（全文见本条末尾）
+   项目地址：https://github.com/dtolnay/proc-macro2、https://github.com/dtolnay/quote、https://github.com/dtolnay/syn、https://github.com/dtolnay/unicode-ident
+   许可证：Apache License 2.0 或 MIT License（二选一）；其中 unicode-ident 另适用 Unicode License v3（全文见本条末尾）
 
 --- Apache License 2.0 全文 ---
 

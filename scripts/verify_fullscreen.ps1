@@ -63,7 +63,7 @@ Start-Sleep -Milliseconds 500
 
 # 1. 启动
 $env:TIMESTICK_LOG = $log
-$p = Start-Process -FilePath "D:\青山公仔\应用\Code\TimeStick\target\release\timestick.exe" -PassThru
+$p = Start-Process -FilePath (Join-Path $PSScriptRoot "..\target\release\timestick.exe") -PassThru
 Start-Sleep -Seconds 1
 Write-Host "TimeStick PID=$($p.Id)"
 

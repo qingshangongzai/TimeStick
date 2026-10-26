@@ -14,6 +14,7 @@
 //! 支持拖动、固定（鼠标穿透）、关闭（隐藏，后台继续常驻；托盘可随时唤回）。固定状态仅在本次运行内保留。
 //!
 //! 悬停展开：鼠标未悬停时仅显示居中时间（无背景无按钮），悬停时亮出背景与按钮。
+//! 按钮依次为图钉 / 关闭。
 //! 非固定模式由 WM_MOUSEMOVE/TrackMouseEvent 即时驱动；固定模式（鼠标穿透）收不到
 //! 鼠标消息，由 250ms 轮询驱动同一状态，兼作 1.5s 自动解除固定。
 //!
@@ -25,7 +26,7 @@ use std::mem::size_of;
 use windows::core::{w, PCWSTR, Result};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    GetDC, GetMonitorInfoW, GetPixel, MonitorFromWindow, ReleaseDC, HBRUSH, MONITORINFO,
+    GetDC, GetMonitorInfoW, GetPixel, MonitorFromPoint, MonitorFromWindow, ReleaseDC, HBRUSH, MONITORINFO,
     MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -38,13 +39,21 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::log::Log;
 use crate::position;
 use crate::render::{self, Renderer};
+use crate::settings;
 
 const ID_TIMER: usize = 1; // 时间刷新（每次触发后按距下次显示变化的毫秒数重排）
 const ID_HOVER: usize = 2; // 固定模式悬停检测（250ms）
+const ID_BG: usize = 3; // 背景亮度采样（与时间刷新解耦）
 const HOVER_TICK_MS: u32 = 250;
+const BG_TICK_MS: u32 = 250; // 采样周期：配色翻转延迟 ≤250ms
 const HOVER_UNPIN_MS: u32 = 1500; // 悬停超过 1.5s 自动解除固定
 const TIMER_MIN_MS: u32 = 50; // 时间刷新定时器重排下限：防 0 值忙等
 const MARGIN: i32 = 24; // 默认位置距屏幕边缘边距
+const DARK_LUMA: i64 = 96; // 迟滞下沿：低于此判暗背景（白字）
+const LIGHT_LUMA: i64 = 160; // 迟滞上沿：高于此判亮背景（黑字）
+const BG_SAMPLE_GAP: i32 = 4; // 采样点距窗口边缘的像素间距
+const BG_SAMPLE_DY: i32 = 8; // 左右两侧采样点相对窗口垂直中心的偏移
+const BG_SAMPLE_DX: [i32; 5] = [-48, -24, 0, 24, 48]; // 上沿 5 点的水平偏移
 
 /// 悬浮窗组件。
 pub struct Floater {
@@ -66,6 +75,14 @@ pub struct Floater {
     seven_seg: bool,
     /// 显示大小档位索引（render::FONT_LEVELS 下标）；勾选状态唯一真源，托盘菜单每次弹出时读取
     size_level: u8,
+    /// 背景亮度判定缓存（仅 `sample_background` 写入）；构造 `true`，与"采样失败按暗处理"一致
+    dark_bg: bool,
+    /// 显示配色模式；勾选状态唯一真源，托盘每次弹菜单时读取
+    color_mode: settings::ColorMode,
+    /// 位置模式：0=记忆（pos 会话记忆 + position.txt），1-9=九宫格格位（行优先）；勾选状态唯一真源，托盘菜单每次弹出时读取
+    position_mode: u8,
+    /// 九宫格绑定的显示器设备名（position_mode=0 时不读；空=未绑定，show 时回退主屏）
+    position_monitor: String,
     /// 当前窗口左上角位置（会话内记忆，拖动后更新）
     pos: Option<POINT>,
     dragging: bool,
@@ -88,6 +105,10 @@ impl Floater {
             show_seconds: false,
             seven_seg: false,
             size_level: render::SIZE_LEVEL_DEFAULT,
+            dark_bg: true,
+            color_mode: settings::ColorMode::Auto,
+            position_mode: 0,
+            position_monitor: String::new(),
             pos: None,
             dragging: false,
             drag_start: POINT::default(),
@@ -108,6 +129,83 @@ impl Floater {
     /// 当前是否七段数码管风格（供托盘菜单勾选状态；真源唯一，Tray 不存副本）。
     pub fn seven_seg(&self) -> bool {
         self.seven_seg
+    }
+
+    /// 当前显示配色模式（供托盘菜单勾选状态；真源唯一，Tray 不存副本）。
+    pub fn color_mode(&self) -> settings::ColorMode {
+        self.color_mode
+    }
+
+    /// 当前位置模式（供托盘菜单勾选状态；真源唯一，Tray 不存副本）。
+    pub fn position_mode(&self) -> u8 {
+        self.position_mode
+    }
+
+    /// 由自身全部 6 个偏好字段构造设置快照（main.rs 持久化用）。
+    pub fn settings(&self) -> settings::Settings {
+        settings::Settings {
+            show_seconds: self.show_seconds,
+            seven_seg: self.seven_seg,
+            size_level: self.size_level,
+            color_mode: self.color_mode,
+            position_mode: self.position_mode,
+            position_monitor: self.position_monitor.clone(),
+        }
+    }
+
+    /// 启动时恢复位置模式（窗口必未创建，仅赋值两个字段；mode 合法性由 settings::parse 保证）。
+    pub fn restore_position(&mut self, mode: u8, monitor: &str) {
+        self.position_mode = mode;
+        self.position_monitor = monitor.to_string();
+    }
+
+    /// 切换位置模式（托盘菜单）：0=记忆，1-9=九宫格。
+    /// 可见时立即移窗；隐藏时只更新字段与绑定屏，下次 show() 重算。持久化由调用方负责（无失败路径，切完即存）。
+    pub fn set_position_mode(&mut self, mode: u8) {
+        if self.position_mode == mode {
+            return;
+        }
+        // 九宫格捕获绑定屏：窗口可见取窗口所在屏；隐藏（窗口已销毁）取光标所在屏
+        if mode != 0 {
+            let mon = match self.hwnd {
+                Some(hwnd) => unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) },
+                None => unsafe {
+                    let mut cur = POINT::default();
+                    let _ = GetCursorPos(&mut cur);
+                    MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST)
+                },
+            };
+            // 捕获失败记日志保持旧绑定（show 时经 resolve_monitor 回退主屏）
+            if let Some(name) = position::device_name(mon) {
+                self.position_monitor = name;
+            } else {
+                Log::log("position monitor capture failed, keep previous");
+            }
+        }
+        self.position_mode = mode;
+        // 隐藏：窗口与渲染器已销毁（见 hide()），目标位无尺寸来源；下次 show() 按新模式重算
+        let Some(hwnd) = self.hwnd else {
+            self.pos = None;
+            Log::log(&format!("position mode: {mode}"));
+            return;
+        };
+        // 可见：立即移窗。hwnd 与 renderer 同生共死（recreate() 既有注释），unwrap 属不变量必达点豁免
+        let size = self.renderer.as_ref().unwrap().size;
+        let target = if mode == 0 {
+            // 切回记忆：移回 position.txt 记录位；无记录 → 主屏右下角默认位
+            position::load(size).unwrap_or_else(|| self.default_pos())
+        } else {
+            // 九宫格：按刚捕获的绑定屏算格位，与 show() 同一口径（捕获失败保持旧绑定时两处不分裂）；解析失败回退默认位
+            position::resolve_monitor(&self.position_monitor)
+                .map_or_else(|| self.default_pos(), |r| position::grid_point(r, mode, size))
+        };
+        self.pos = Some(target);
+        // 换位后背景可能已变：立即采一次（固定色模式不读屏）
+        if self.color_mode == settings::ColorMode::Auto {
+            self.sample_background(hwnd);
+        }
+        self.render_now(hwnd); // present 的 UpdateLayeredWindow 自带移窗
+        Log::log(&format!("position mode: {mode}"));
     }
 
     /// 切换时间格式（HH:MM ↔ HH:MM:SS）。
@@ -163,6 +261,25 @@ impl Floater {
         }
     }
 
+    /// 切换显示配色：仅重绘，不重建渲染器；切到自动时恢复采样定时器。
+    /// 固定色模式停掉 `ID_BG`：不再读屏（HDR / 独占全屏下的 `GetPixel` 盲区随之绕过）。
+    pub fn set_color_mode(&mut self, mode: settings::ColorMode) {
+        if self.color_mode == mode {
+            return;
+        }
+        self.color_mode = mode;
+        // 窗口未建：只改字段，show() 时按新模式生效
+        let Some(hwnd) = self.hwnd else { return };
+        if mode == settings::ColorMode::Auto {
+            unsafe { SetTimer(Some(hwnd), ID_BG, BG_TICK_MS, None); }
+            // 立即定色，不等下一次 ID_BG；随后统一重绘，故忽略返回值
+            self.sample_background(hwnd);
+        } else {
+            unsafe { let _ = KillTimer(Some(hwnd), ID_BG); }
+        }
+        self.render_now(hwnd);
+    }
+
     /// 按当前 show_seconds/seven_seg/size_level 重建渲染器并适配窗口（三个 setter 共用）。
     /// 窗口不可见返回 true（下次 show() 的 ensure_created 按新字段建）；
     /// 重建失败恢复旧渲染器并返回 false（调用方回滚字段）。
@@ -182,6 +299,12 @@ impl Floater {
                 let mut pos = self.pos.unwrap_or(POINT { x: 0, y: 0 });
                 pos.x -= (w - old_size.0) / 2;
                 pos.y -= (h - old_size.1) / 2;
+                // 九宫格：按格位 + 新尺寸重算（绑定屏），窗口钉在格位不随尺寸变化漂移；解析失败退回上方中心锚点
+                if self.position_mode != 0
+                    && let Some(r) = position::resolve_monitor(&self.position_monitor)
+                {
+                    pos = position::grid_point(r, self.position_mode, (w, h));
+                }
                 unsafe {
                     let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                     let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
@@ -257,12 +380,16 @@ impl Floater {
             return;
         }
         self.visible = true;
-        // 首次显示：恢复上次会话位置；无记录或换算失败 → 默认主屏右下角
-        let pos = self.pos.unwrap_or_else(|| {
-            // ensure_created 刚成功，renderer 必为 Some（规范豁免的 unwrap 点）
-            let size = self.renderer.as_ref().unwrap().size;
-            position::load(size).unwrap_or_else(|| self.default_pos())
-        });
+        // ensure_created 刚成功，renderer 必为 Some（规范豁免的 unwrap 点）
+        let size = self.renderer.as_ref().unwrap().size;
+        // 位置来源按模式分支：记忆 = 会话记忆优先（首次走 position.txt，无记录 → 主屏右下角）；
+        // 九宫格 = 每次显示重算（不用会话记忆），覆盖隐藏期切格位与分辨率/显示器变化
+        let pos = if self.position_mode == 0 {
+            self.pos.unwrap_or_else(|| position::load(size).unwrap_or_else(|| self.default_pos()))
+        } else {
+            position::resolve_monitor(&self.position_monitor)
+                .map_or_else(|| self.default_pos(), |r| position::grid_point(r, self.position_mode, size))
+        };
         self.pos = Some(pos);
         Log::log(&format!("floater shown at ({}, {})", pos.x, pos.y));
         let hwnd = self.hwnd.unwrap();
@@ -271,9 +398,18 @@ impl Floater {
             self.apply_pinned_style(hwnd, true);
         }
         self.render_now(hwnd);
+        // 窗口在 ensure_created 建于 (0,0)，须等上面 present 的 UpdateLayeredWindow 移到目标位置后再首采；
+        // 首帧沿用旧判定，采样翻转才补一帧（代价 ≤1 次额外绘制）。固定色模式不读屏也不起定时器，
+        // 否则 bright 场景会白记一条 bg flip。
+        if self.color_mode == settings::ColorMode::Auto && self.sample_background(hwnd) {
+            self.render_now(hwnd);
+        }
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             SetTimer(Some(hwnd), ID_TIMER, 1000, None); // 每秒刷新时间
+            if self.color_mode == settings::ColorMode::Auto {
+                SetTimer(Some(hwnd), ID_BG, BG_TICK_MS, None); // 背景采样与时间刷新解耦；固定色模式不读屏
+            }
             // hide() 会杀掉 ID_HOVER；固定状态跨全屏会话保留，须按 pinned 恢复，
             // 否则悬停 1.5s 自动解除固定与固定模式悬停展开反馈永久失效
             if self.pinned {
@@ -298,6 +434,8 @@ impl Floater {
             let _ = ReleaseCapture();
             let _ = KillTimer(Some(hwnd), ID_TIMER);
             let _ = KillTimer(Some(hwnd), ID_HOVER);
+            // 窗口销毁前必杀采样定时器，否则重建后采样永久失效
+            let _ = KillTimer(Some(hwnd), ID_BG);
             let _ = DestroyWindow(hwnd);
         }
         // 隐藏即销毁：窗口与渲染器随隐藏释放，内存回落至静默态；再次显示经 ensure_created 重建
@@ -436,7 +574,7 @@ impl Floater {
         unsafe {
             let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
             let mon = MonitorFromWindow(HWND::default(), MONITOR_DEFAULTTOPRIMARY);
-            // 仅 show() 在 ensure_created 成功后调用，renderer 必为 Some（规范豁免的 unwrap 点）
+            // 仅 show() 与 set_position_mode 可见分支调用，两者均保证 renderer 已创建（规范豁免的 unwrap 点）
             let (w, h) = self.renderer.as_ref().unwrap().size;
             if GetMonitorInfoW(mon, &mut mi).as_bool() {
                 let m = mi.rcMonitor;
@@ -447,11 +585,19 @@ impl Floater {
         }
     }
 
+    /// 折算给渲染层的背景判定：固定色模式忽略采样结果（自动=采样、常驻白=`true`、常驻黑=`false`）。
+    fn effective_dark_bg(&self) -> bool {
+        match self.color_mode {
+            settings::ColorMode::Auto => self.dark_bg,
+            settings::ColorMode::White => true,
+            settings::ColorMode::Black => false,
+        }
+    }
+
     fn render_now(&self, hwnd: HWND) {
         let Some(renderer) = &self.renderer else { return };
         let t = if self.show_seconds { now_hms() } else { now_hhmm() };
-        let dark_bg = self.background_is_dark(hwnd);
-        renderer.render(&t, self.pinned, self.hovering, dark_bg);
+        renderer.render(&t, self.pinned, self.hovering, self.effective_dark_bg());
         let pos = self.pos.unwrap_or(POINT { x: 0, y: 0 });
         renderer.present(hwnd, pos);
     }
@@ -468,41 +614,76 @@ impl Floater {
         ms.max(TIMER_MIN_MS)
     }
 
-    /// 采样悬浮窗上方背景的亮度，决定配色（浅色背景 → 黑色文字 + 白底）。
-    /// 窗口矩形上沿 4px 处取 5 个采样点（窗口贴顶时改采下沿外侧）。
-    fn background_is_dark(&self, hwnd: HWND) -> bool {
+    /// 采样 9 点亮度并取低中位数（无有效点返回 None）。
+    /// 几何与 scripts/measure_bg_lum.ps1 严格一致：上沿外 4px 的 5 点（贴顶改下沿外）+ 左右两侧外 4px 各 2 点。
+    /// 单条采样线易被黑边/字幕带偏，扩面提高鲁棒性；两侧点落在画面中部，与黑边场景天然分离。
+    fn sample_luma(&self, hwnd: HWND) -> Option<i64> {
         unsafe {
             let mut wr = RECT::default();
             if GetWindowRect(hwnd, &mut wr).is_err() {
-                return true;
+                return None;
             }
             let hdc = GetDC(None);
             if hdc.is_invalid() {
-                return true;
+                return None;
             }
-            let sample_y = if wr.top - 4 >= 0 { wr.top - 4 } else { wr.bottom + 4 };
+            let edge_y = if wr.top - BG_SAMPLE_GAP >= 0 { wr.top - BG_SAMPLE_GAP } else { wr.bottom + BG_SAMPLE_GAP };
             let cx = (wr.left + wr.right) / 2;
-            let mut lum_sum: i64 = 0;
-            let mut n: i64 = 0;
-            for dx in [-48i32, -24, 0, 24, 48] {
-                let c = GetPixel(hdc, cx + dx, sample_y);
+            let cy = (wr.top + wr.bottom) / 2;
+            let mut pts = [(0i32, 0i32); 9];
+            for (i, dx) in BG_SAMPLE_DX.iter().enumerate() {
+                pts[i] = (cx + dx, edge_y);
+            }
+            pts[5] = (wr.left - BG_SAMPLE_GAP, cy - BG_SAMPLE_DY);
+            pts[6] = (wr.left - BG_SAMPLE_GAP, cy + BG_SAMPLE_DY);
+            pts[7] = (wr.right + BG_SAMPLE_GAP, cy - BG_SAMPLE_DY);
+            pts[8] = (wr.right + BG_SAMPLE_GAP, cy + BG_SAMPLE_DY);
+            // 有效点用定长数组 + 计数，不分配 Vec；失败点（CLR_INVALID）丢弃
+            let mut values = [0i64; 9];
+            let mut n = 0usize;
+            for (x, y) in pts {
+                let c = GetPixel(hdc, x, y);
                 if c.0 != 0xFFFF_FFFF {
                     // COLORREF 为 0x00BBGGRR，失败返回 CLR_INVALID(0xFFFFFFFF)
                     let r = (c.0 & 0xff) as i64;
                     let g = ((c.0 >> 8) & 0xff) as i64;
                     let b = ((c.0 >> 16) & 0xff) as i64;
-                    lum_sum += (r * 299 + g * 587 + b * 114) / 1000;
+                    values[n] = (r * 299 + g * 587 + b * 114) / 1000;
                     n += 1;
                 }
             }
             let _ = ReleaseDC(None, hdc);
-            if n == 0 {
-                crate::log::Log::log("bg sample: all GetPixel failed, treat as dark");
-                return true;
-            }
-            let lum = lum_sum / n;
-            crate::log::Log::log(&format!("bg sample lum={} (dark={})", lum, lum < 128));
-            lum < 128
+            median_luma(&mut values, n)
+        }
+    }
+
+    /// 采样一次：更新 dark_bg，判定翻转返回 true（调用方据此重绘）。
+    /// 迟滞带内维持现状；采样全失败按暗处理——与既有兜底一致。
+    fn sample_background(&mut self, hwnd: HWND) -> bool {
+        let lum = self.sample_luma(hwnd);
+        let dark = match lum {
+            Some(v) => decide_dark(v, self.dark_bg),
+            None => true,
+        };
+        if dark == self.dark_bg {
+            return false; // 带内维持 / 全失败且已是暗：不重绘、不记日志（避免 4 Hz 刷屏）
+        }
+        self.dark_bg = dark;
+        match lum {
+            Some(v) => Log::log(&format!("bg flip: lum={v} dark={dark}")),
+            None => Log::log("bg flip: sample failed dark=true"),
+        }
+        true
+    }
+
+    /// ID_BG 定时器：仅判定翻转时重绘（时间刷新由 ID_TIMER 负责）。
+    fn on_bg_tick(&mut self) {
+        if !self.visible {
+            return;
+        }
+        let Some(hwnd) = self.hwnd else { return };
+        if self.sample_background(hwnd) {
+            self.render_now(hwnd);
         }
     }
 
@@ -515,13 +696,22 @@ impl Floater {
         let x = (lparam.0 & 0xffff) as i16 as i32;
         let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
         let p = POINT { x, y };
-        if pt_in_rect(&renderer.btn_pin, p) {
+        // 先取齐两个按钮的命中结果：命中后的处理要 &mut self，之后不能再借 renderer
+        let hit_pin = pt_in_rect(&renderer.btn_pin, p);
+        let hit_close = pt_in_rect(&renderer.btn_close, p);
+        if hit_pin {
             self.set_pinned(true);
             return;
         }
-        if pt_in_rect(&renderer.btn_close, p) {
+        if hit_close {
             self.hide();
             return;
+        }
+        // 九宫格下拖动 = 切回记忆模式：模式切换即刻持久化；拖完照常写 position.txt
+        if self.position_mode != 0 {
+            self.position_mode = 0;
+            settings::save(&self.settings());
+            Log::log("drag: back to memory mode");
         }
         // 其余区域：开始拖动
         unsafe {
@@ -565,6 +755,10 @@ impl Floater {
                 self.hover_ms = 0;
                 self.render_now(hwnd);
             }
+            // 换位后背景可能已变：立即采一次，不等下一次 ID_BG（固定色模式不读屏）
+            if self.color_mode == settings::ColorMode::Auto && self.sample_background(hwnd) {
+                self.render_now(hwnd);
+            }
             // 拖动结束：持久化当前大致位置（跨重启恢复，见 position.rs）
             position::save(hwnd);
         }
@@ -583,6 +777,21 @@ fn now_hhmm() -> String {
 fn now_hms() -> String {
     let st = unsafe { GetLocalTime() };
     format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond)
+}
+
+/// 有效点亮度 → 低中位数：升序 sorted[(n-1)/2]（偏暗倾向，与"采样失败按暗处理"一致）。
+/// n 为有效点数，values[..n] 有效
+fn median_luma(values: &mut [i64], n: usize) -> Option<i64> {
+    if n == 0 {
+        return None;
+    }
+    values[..n].sort();
+    Some(values[(n - 1) / 2])
+}
+
+/// 迟滞判定：< DARK_LUMA 暗；> LIGHT_LUMA 亮；带内维持 prev
+fn decide_dark(lum: i64, prev: bool) -> bool {
+    if lum < DARK_LUMA { true } else if lum > LIGHT_LUMA { false } else { prev }
 }
 
 unsafe extern "system" fn floater_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -617,6 +826,8 @@ unsafe extern "system" fn floater_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             WM_TIMER => {
                 if wparam.0 == ID_HOVER {
                     floater.on_hover_tick();
+                } else if wparam.0 == ID_BG {
+                    floater.on_bg_tick();
                 } else if let Some(hwnd) = floater.hwnd {
                     floater.render_now(hwnd);
                     // 按距下一次显示变化的毫秒数重排定时器（wMilliseconds/wSecond 实时读取），
@@ -627,5 +838,47 @@ unsafe extern "system" fn floater_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn median_luma_takes_lower_median() {
+        // 实测字幕锚点：5 暗点 + 4 白字点，低中位数 30（均值 130 会误判亮）
+        let mut v = [30, 30, 30, 30, 30, 255, 255, 255, 255];
+        assert_eq!(median_luma(&mut v, 9), Some(30));
+    }
+
+    #[test]
+    fn median_luma_even_count_takes_lower_middle() {
+        let mut v = [232, 20];
+        assert_eq!(median_luma(&mut v, 2), Some(20));
+        let mut v = [40, 10, 30, 20];
+        assert_eq!(median_luma(&mut v, 4), Some(20));
+    }
+
+    #[test]
+    fn median_luma_edge_counts() {
+        let mut v = [0i64; 9];
+        assert_eq!(median_luma(&mut v, 0), None); // 全失败
+        let mut v = [7];
+        assert_eq!(median_luma(&mut v, 1), Some(7));
+    }
+
+    #[test]
+    fn decide_dark_hysteresis_boundaries() {
+        // 95 < DARK_LUMA(96) 恒暗；161 > LIGHT_LUMA(160) 恒亮——与 prev 无关
+        assert!(decide_dark(95, false));
+        assert!(decide_dark(95, true));
+        assert!(!decide_dark(161, false));
+        assert!(!decide_dark(161, true));
+        // 96 / 160 落在带内：维持 prev
+        assert!(decide_dark(96, true));
+        assert!(!decide_dark(96, false));
+        assert!(decide_dark(160, true));
+        assert!(!decide_dark(160, false));
     }
 }

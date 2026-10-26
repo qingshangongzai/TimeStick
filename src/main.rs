@@ -18,6 +18,8 @@
 
 mod about;
 mod autostart;
+mod blacklist;
+mod blacklist_edit;
 mod detect;
 mod floater;
 mod icon;
@@ -47,6 +49,8 @@ pub const WM_APP_TRAY: u32 = WM_APP + 1; // 托盘回调
 pub const WM_APP_FS: u32 = WM_APP + 2;   // 全屏状态变化，wparam: 1=进入 0=退出
 pub const WM_APP_EXIT: u32 = WM_APP + 3; // 请求退出
 pub const WM_APP_ABOUT_CLOSED: u32 = WM_APP + 4; // 关于对话框已销毁（无参数约定）
+pub const WM_APP_BLACKLIST_CLOSED: u32 = WM_APP + 5; // 黑名单管理对话框已销毁（无参数约定）
+pub const WM_APP_BLACKLIST_APP: u32 = WM_APP + 6; // 上次全屏应用更新，lparam: UTF-16 字符串指针（同线程 SendMessage，调用期间有效）
 
 pub const HOTKEY_ID: i32 = 1; // Ctrl+Alt+T：固定模式解除固定
 
@@ -61,6 +65,10 @@ struct App {
     hicon_sm: HICON,
     /// 关于对话框句柄（防重入；销毁经 WM_APP_ABOUT_CLOSED 清空）
     about_hwnd: Option<HWND>,
+    /// 黑名单管理对话框句柄（防重入；销毁经 WM_APP_BLACKLIST_CLOSED 清空）
+    blacklist_hwnd: Option<HWND>,
+    /// 上次进入全屏时前台应用的完整路径（对话框「加入黑名单」用；退出全屏不清空，下次进入覆盖）
+    last_fullscreen_exe: Option<String>,
     /// 开机自启动勾选状态（真源是注册表，此处仅作菜单显示缓存，见 src/autostart.rs）
     auto_start: bool,
 }
@@ -76,6 +84,8 @@ impl App {
         let _ = floater.set_show_seconds(pref.show_seconds);
         let _ = floater.set_seven_seg(pref.seven_seg);
         let _ = floater.set_size_level(pref.size_level);
+        floater.set_color_mode(pref.color_mode);
+        floater.restore_position(pref.position_mode, &pref.position_monitor);
 
         // 隐藏主窗口：承载托盘回调、全局热键与全屏消息
         let class = w!("TimeStickMain");
@@ -98,16 +108,12 @@ impl App {
             CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("TimeStick"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst), None)?
         };
         let tray = tray::Tray::new(main_hwnd)?;
-        Ok(App { main_hwnd, floater, tray, hicon, hicon_sm, about_hwnd: None, auto_start: autostart::is_enabled() })
+        Ok(App { main_hwnd, floater, tray, hicon, hicon_sm, about_hwnd: None, blacklist_hwnd: None, last_fullscreen_exe: None, auto_start: autostart::is_enabled() })
     }
 
     /// 从各真源收集当前偏好并持久化（切换生效后调用）。
     fn save_prefs(&self) {
-        settings::save(&settings::Settings {
-            show_seconds: self.floater.show_seconds(),
-            seven_seg: self.floater.seven_seg(),
-            size_level: self.floater.size_level(),
-        });
+        settings::save(&self.floater.settings());
     }
 
     fn request_exit(&mut self) {
@@ -140,7 +146,14 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         let app = &mut *app_ptr;
         match msg {
             WM_APP_TRAY => {
-                app.tray.on_message(lparam, app.floater.show_seconds(), app.floater.seven_seg(), app.floater.size_level(), app.auto_start);
+                app.tray.on_message(lparam, &tray::MenuState {
+                    show_seconds: app.floater.show_seconds(),
+                    seven_seg: app.floater.seven_seg(),
+                    size_level: app.floater.size_level(),
+                    color_mode: app.floater.color_mode(),
+                    position_mode: app.floater.position_mode(),
+                    auto_start: app.auto_start,
+                });
                 LRESULT(0)
             }
             WM_COMMAND => {
@@ -149,6 +162,10 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                     tray::TRAY_CMD_SHOW => {
                         Log::log("tray: show floater");
                         app.floater.show();
+                    }
+                    tray::TRAY_CMD_BLACKLIST => {
+                        Log::log("tray: blacklist manager");
+                        blacklist_edit::show(&mut app.blacklist_hwnd, app.main_hwnd, app.last_fullscreen_exe.as_deref());
                     }
                     tray::TRAY_CMD_ABOUT => {
                         Log::log("tray: about");
@@ -190,6 +207,29 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                             app.save_prefs();
                         }
                     }
+                    // 配色模式为纯字段切换、无失败路径（不重建渲染器），切换后直接持久化
+                    tray::TRAY_CMD_COLOR_AUTO => {
+                        Log::log("tray: color auto");
+                        app.floater.set_color_mode(settings::ColorMode::Auto);
+                        app.save_prefs();
+                    }
+                    tray::TRAY_CMD_COLOR_WHITE => {
+                        Log::log("tray: color white");
+                        app.floater.set_color_mode(settings::ColorMode::White);
+                        app.save_prefs();
+                    }
+                    tray::TRAY_CMD_COLOR_BLACK => {
+                        Log::log("tray: color black");
+                        app.floater.set_color_mode(settings::ColorMode::Black);
+                        app.save_prefs();
+                    }
+                    // 位置模式 = 命令 ID 区间算出（ID 连续，起点为记忆，见 tray.rs）；
+                    // 纯字段/移窗切换无失败路径，切换后直接持久化（日志由 set_position_mode 内记）
+                    tray::TRAY_CMD_POS_MEMORY..=tray::TRAY_CMD_POS_BR => {
+                        let mode = (id - tray::TRAY_CMD_POS_MEMORY) as u8;
+                        app.floater.set_position_mode(mode);
+                        app.save_prefs();
+                    }
                     tray::TRAY_CMD_AUTO_START => {
                         Log::log(if app.auto_start { "tray: disable auto-start" } else { "tray: enable auto-start" });
                         // 注册表为真源：写入失败不翻转缓存，菜单勾选保持与实际一致
@@ -213,6 +253,18 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             WM_APP_FS => {
                 if wparam.0 != 0 {
                     Log::log("fullscreen entered, showing floater");
+                    // 此刻前台仍是目标应用（悬浮窗以 SW_SHOWNOACTIVATE 显示，不夺前台）；
+                    // 托盘菜单与管理对话框都会抢前台，过后再查只能查到 timestick 自己；
+                    // 取不到时保留上次值，宁可显示旧值也不清空
+                    if let Some(exe) = detect::foreground_exe() {
+                        // 对话框开着时同步推一次：那一行是快照，不推就会一直显示旧值
+                        if let Some(dlg) = app.blacklist_hwnd {
+                            let mut buf: Vec<u16> = exe.encode_utf16().collect();
+                            buf.push(0);
+                            let _ = SendMessageW(dlg, WM_APP_BLACKLIST_APP, Some(WPARAM(0)), Some(LPARAM(buf.as_ptr() as isize)));
+                        }
+                        app.last_fullscreen_exe = Some(exe);
+                    }
                     app.floater.show();
                 } else {
                     Log::log("fullscreen exited, hiding floater");
@@ -226,6 +278,10 @@ unsafe extern "system" fn app_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             }
             WM_APP_ABOUT_CLOSED => {
                 app.about_hwnd = None;
+                LRESULT(0)
+            }
+            WM_APP_BLACKLIST_CLOSED => {
+                app.blacklist_hwnd = None;
                 LRESULT(0)
             }
             WM_DESTROY => {

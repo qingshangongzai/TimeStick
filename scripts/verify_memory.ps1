@@ -2,6 +2,9 @@
 # 重建路径完整恢复（窗口位置/可见性 + 固定模式鼠标穿透样式）。任一断言失败退出码非 0。
 $ErrorActionPreference = "Stop"
 $log = "$env:TEMP\timestick_mem.log"
+$exePath = Join-Path $PSScriptRoot "..\target\release\timestick.exe"
+# 前置检查放在任何副作用（杀进程 / 挪光标）之前：缺 exe 时不该先动用户的运行实例
+if (-not (Test-Path $exePath)) { throw "未找到 $exePath，请先执行 cargo build --release" }
 Remove-Item $log -ErrorAction SilentlyContinue
 
 Add-Type @"
@@ -72,6 +75,27 @@ function Get-PrivateMemMB([int]$procId) {
     return [math]::Round($p.PrivateMemorySize64 / 1MB, 2)
 }
 
+# 图钉热区中心 X：按 render.rs 布局公式换算——宽度 = pad + text + gap + btn + gap + btn + pad，
+# 故 x_pin = 客户区宽 - (pad + gap + 2*btn)，中心再加 btn/2。
+# 不得写死偏移：按钮增减或切换档位都会使偏移失准，且会静默命中相邻热区。
+# 档位表与间距常量需与 render.rs 的 FONT_LEVELS / PAD_X / BTN_GAP / BTN_SIZE 同批更新。
+function Get-PinCenterX([int]$clientWidth) {
+    $fonts = @(14.0, 18.0, 22.0, 28.0, 36.0)
+    $level = 1  # 默认小档 18.0，与 render.rs 的 SIZE_LEVEL_DEFAULT 一致
+    $cfg = Join-Path $env:APPDATA "TimeStick\settings.txt"
+    if (Test-Path $cfg) {
+        $m = Select-String -Path $cfg -Pattern '^size_level=(\d)'
+        if ($m) { $level = [int]$m.Matches[0].Groups[1].Value }
+    }
+    # 文件可手改，非法档位回退默认档（与 settings.rs 的容错取向一致）
+    if ($level -lt 0 -or $level -ge $fonts.Count) { $level = 1 }
+    $scale = $fonts[$level] / 18.0
+    $btn = [Math]::Max(14.0 * $scale, 14.0)  # 按钮只放大不缩小
+    $gap = 3.0 * $scale
+    $pad = 6.0 * $scale
+    return [int][Math]::Round($clientWidth - ($pad + $gap + 2 * $btn) + $btn / 2)
+}
+
 $script:failed = $false
 function Assert([bool]$cond, [string]$msg) {
     if ($cond) { Write-Host "  [PASS] $msg" }
@@ -91,7 +115,7 @@ $cy = [int](([MemWin]::GetSystemMetrics(1)) / 2)
 
 # 1. 启动（静默驻留基线）
 $env:TIMESTICK_LOG = $log
-$p = Start-Process -FilePath "D:\青山公仔\应用\Code\TimeStick\target\release\timestick.exe" -PassThru
+$p = Start-Process -FilePath $exePath -PassThru
 Start-Sleep -Seconds 4
 $memSilent = Get-PrivateMemMB $p.Id
 Write-Host "`n[1] 静默驻留（从未显示）: 私有内存 ${memSilent}MB"
@@ -107,10 +131,10 @@ Assert ($fh1 -ne $null) "悬浮窗已创建（TimeStickFloater 类窗口存在�
 Assert ([MemWin]::IsWindowVisible($fh1)) "悬浮窗可见"
 Assert ($memShown -gt 5) "渲染器创建后私有内存 > 5MB（实测 ${memShown}MB）"
 
-# 3. 固定模式：向图钉按钮发 WM_LBUTTONDOWN（lparam 取按钮中心：x = 客户区宽 - 33，见 render.rs 布局）
+# 3. 固定模式：向图钉按钮发 WM_LBUTTONDOWN（lparam 取图钉热区中心，坐标随显示档位换算）
 $r = New-Object MemWin+RECT
 [MemWin]::GetClientRect($fh1, [ref]$r) | Out-Null
-$x = $r.Right - 33
+$x = Get-PinCenterX $r.Right
 $y = [int]($r.Bottom / 2)
 $lp = [IntPtr]([int64](($y -shl 16) -bor ($x -band 0xffff)))
 [MemWin]::SendMessageW($fh1, 0x0201, [IntPtr]::Zero, $lp) | Out-Null  # WM_LBUTTONDOWN

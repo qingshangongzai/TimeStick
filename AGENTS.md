@@ -8,6 +8,7 @@
 
 ## Skill 触发对照（用户说关键词时自动用）
 
+
 | 用户意图 | Skill | 触发词 |
 |---|---|---|
 | 审查代码 | `code-review` | 检查代码、代码审查、review、核对修改 |
@@ -18,5 +19,5 @@
 
 ## 约定
 
-- skill 以 `skills/`（已提交仓库）为唯一维护源；各工具目录（`.trae/skills/`、`.zcode/skills/`）下的副本从它同步（`Copy-Item -Path skills\* -Destination .trae\skills -Recurse -Force`，zcode 同理），永不直接修改。
+- skill 以 `skills/`（已提交仓库）为唯一维护源；各工具目录（`.qoder/skills/`、`.trae/skills/`、`.zcode/skills/`）下的副本从它同步（`Copy-Item -Path skills\* -Destination .qoder\skills -Recurse -Force`，trae、zcode 同理），永不直接修改。
 - 版本号与依赖版本唯一来源：根目录 `Cargo.toml`（禁止手改任何其他处的版本号）。

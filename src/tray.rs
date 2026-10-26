@@ -11,7 +11,8 @@
  */
 
 //! 系统托盘：优先加载 exe 内嵌图标（与文件图标同一设计源，见 src/icon.rs），
-//! 失败时回退到 GDI 绘制的表盘；右键弹出菜单【显示悬浮窗】【关于 TimeStick】【直接退出】。
+//! 失败时回退到 GDI 绘制的表盘；右键菜单：【显示悬浮窗】【黑名单管理】
+//! 【时间格式】【显示风格】【显示大小】【显示配色】【显示位置】【开机自启动】【关于】【直接退出】。
 
 use std::mem::size_of;
 use std::ptr::null_mut;
@@ -35,6 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::icon;
 use crate::log::Log;
+use crate::settings;
 
 pub const TRAY_CMD_SHOW: usize = 1000; // 显示悬浮窗
 pub const TRAY_CMD_EXIT: usize = 1001; // 直接退出
@@ -50,7 +52,34 @@ pub const TRAY_CMD_SIZE_S: usize = 1009;
 pub const TRAY_CMD_SIZE_M: usize = 1010;
 pub const TRAY_CMD_SIZE_L: usize = 1011;
 pub const TRAY_CMD_SIZE_XL: usize = 1012;
+// 显示配色三选一：自动反色 / 常驻白色 / 常驻黑色
+pub const TRAY_CMD_COLOR_AUTO: usize = 1013;
+pub const TRAY_CMD_COLOR_WHITE: usize = 1014;
+pub const TRAY_CMD_COLOR_BLACK: usize = 1015;
+pub const TRAY_CMD_BLACKLIST: usize = 1016; // 黑名单管理对话框
+// 显示位置：记忆 + 九宫格九格位。命令 ID 连续，位置模式 = id - TRAY_CMD_POS_MEMORY（0=记忆，1-9=格位）
+pub const TRAY_CMD_POS_MEMORY: usize = 1017;
+pub const TRAY_CMD_POS_TL: usize = 1018; // 左上（1）
+pub const TRAY_CMD_POS_TC: usize = 1019; // 上中（2）
+pub const TRAY_CMD_POS_TR: usize = 1020; // 右上（3）
+pub const TRAY_CMD_POS_ML: usize = 1021; // 左中（4）
+pub const TRAY_CMD_POS_MC: usize = 1022; // 居中（5）
+pub const TRAY_CMD_POS_MR: usize = 1023; // 右中（6）
+pub const TRAY_CMD_POS_BL: usize = 1024; // 左下（7）
+pub const TRAY_CMD_POS_BC: usize = 1025; // 下中（8）
+pub const TRAY_CMD_POS_BR: usize = 1026; // 右下（9）
 const TRAY_ID: u32 = 1;
+
+/// 托盘菜单勾选项快照：各项真源在各自模块（自启动真源是注册表），Tray 只接收当次值、不存副本
+pub struct MenuState {
+    pub show_seconds: bool,
+    pub seven_seg: bool,
+    pub size_level: u8,
+    pub color_mode: settings::ColorMode,
+    /// 位置模式：0=记忆，1-9=九宫格格位
+    pub position_mode: u8,
+    pub auto_start: bool,
+}
 
 pub struct Tray {
     hwnd: HWND,
@@ -94,15 +123,14 @@ impl Tray {
     }
 
     /// 处理托盘回调消息（uCallbackMessage = WM_APP_TRAY，lparam 为鼠标消息）。
-    /// show_seconds / seven_seg / size_level / auto_start 由调用方（main.rs）从各真源传入当前值
-    /// ——勾选状态真源唯一（自启动的真源是注册表，见 src/autostart.rs）。
-    pub fn on_message(&self, lparam: LPARAM, show_seconds: bool, seven_seg: bool, size_level: u8, auto_start: bool) {
+    /// 勾选状态经 `MenuState` 快照传入，真源在各自模块（自启动的真源是注册表，见 src/autostart.rs）。
+    pub fn on_message(&self, lparam: LPARAM, state: &MenuState) {
         if (lparam.0 as u32) == WM_RBUTTONUP {
-            self.show_menu(show_seconds, seven_seg, size_level, auto_start);
+            self.show_menu(state);
         }
     }
 
-    fn show_menu(&self, show_seconds: bool, seven_seg: bool, size_level: u8, auto_start: bool) {
+    fn show_menu(&self, state: &MenuState) {
         unsafe {
             // 菜单正常关闭需要窗口处于前台
             let _ = SetForegroundWindow(self.hwnd);
@@ -125,24 +153,58 @@ impl Tray {
                 let _ = DestroyMenu(style_menu);
                 return;
             };
+            // 「显示配色」子菜单创建失败同样整体放弃（此时其余菜单已建，一并清理）
+            let Ok(color_menu) = CreatePopupMenu() else {
+                let _ = DestroyMenu(menu);
+                let _ = DestroyMenu(submenu);
+                let _ = DestroyMenu(style_menu);
+                let _ = DestroyMenu(size_menu);
+                return;
+            };
+            // 「显示位置」子菜单创建失败同样整体放弃（此时其余五个菜单已建，一并清理）
+            let Ok(pos_menu) = CreatePopupMenu() else {
+                let _ = DestroyMenu(menu);
+                let _ = DestroyMenu(submenu);
+                let _ = DestroyMenu(style_menu);
+                let _ = DestroyMenu(size_menu);
+                let _ = DestroyMenu(color_menu);
+                return;
+            };
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_SHOW, w!("显示悬浮窗"));
+            let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_BLACKLIST, w!("黑名单管理..."));
             // 单选组：当前项勾选。MF_RADIO 与 MF_BYPOSITION 同值（0x400），crate 未导出
             // 且该位会被按位置解释，故用 MF_CHECKED 标记当前项
             let checked = MENU_ITEM_FLAGS(MF_CHECKED.0);
             let unchecked = MENU_ITEM_FLAGS(MF_STRING.0); // MF_STRING == MF_UNCHECKED
-            let _ = AppendMenuW(submenu, if show_seconds { unchecked } else { checked }, TRAY_CMD_FORMAT_HM, w!("HH:MM"));
-            let _ = AppendMenuW(submenu, if show_seconds { checked } else { unchecked }, TRAY_CMD_FORMAT_HMS, w!("HH:MM:SS"));
+            let _ = AppendMenuW(submenu, if state.show_seconds { unchecked } else { checked }, TRAY_CMD_FORMAT_HM, w!("HH:MM"));
+            let _ = AppendMenuW(submenu, if state.show_seconds { checked } else { unchecked }, TRAY_CMD_FORMAT_HMS, w!("HH:MM:SS"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_POPUP.0), submenu.0 as usize, w!("时间格式"));
-            let _ = AppendMenuW(style_menu, if seven_seg { unchecked } else { checked }, TRAY_CMD_STYLE_DEFAULT, w!("默认字体"));
-            let _ = AppendMenuW(style_menu, if seven_seg { checked } else { unchecked }, TRAY_CMD_STYLE_SEG, w!("七段数码管"));
+            let _ = AppendMenuW(style_menu, if state.seven_seg { unchecked } else { checked }, TRAY_CMD_STYLE_DEFAULT, w!("默认字体"));
+            let _ = AppendMenuW(style_menu, if state.seven_seg { checked } else { unchecked }, TRAY_CMD_STYLE_SEG, w!("七段数码管"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_POPUP.0), style_menu.0 as usize, w!("显示风格"));
-            let _ = AppendMenuW(size_menu, if size_level == 0 { checked } else { unchecked }, TRAY_CMD_SIZE_XS, w!("极小"));
-            let _ = AppendMenuW(size_menu, if size_level == 1 { checked } else { unchecked }, TRAY_CMD_SIZE_S, w!("小"));
-            let _ = AppendMenuW(size_menu, if size_level == 2 { checked } else { unchecked }, TRAY_CMD_SIZE_M, w!("中"));
-            let _ = AppendMenuW(size_menu, if size_level == 3 { checked } else { unchecked }, TRAY_CMD_SIZE_L, w!("大"));
-            let _ = AppendMenuW(size_menu, if size_level == 4 { checked } else { unchecked }, TRAY_CMD_SIZE_XL, w!("特大"));
+            let _ = AppendMenuW(size_menu, if state.size_level == 0 { checked } else { unchecked }, TRAY_CMD_SIZE_XS, w!("极小"));
+            let _ = AppendMenuW(size_menu, if state.size_level == 1 { checked } else { unchecked }, TRAY_CMD_SIZE_S, w!("小"));
+            let _ = AppendMenuW(size_menu, if state.size_level == 2 { checked } else { unchecked }, TRAY_CMD_SIZE_M, w!("中"));
+            let _ = AppendMenuW(size_menu, if state.size_level == 3 { checked } else { unchecked }, TRAY_CMD_SIZE_L, w!("大"));
+            let _ = AppendMenuW(size_menu, if state.size_level == 4 { checked } else { unchecked }, TRAY_CMD_SIZE_XL, w!("特大"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_POPUP.0), size_menu.0 as usize, w!("显示大小"));
-            let _ = AppendMenuW(menu, if auto_start { checked } else { unchecked }, TRAY_CMD_AUTO_START, w!("开机自启动"));
+            let _ = AppendMenuW(color_menu, if state.color_mode == settings::ColorMode::Auto { checked } else { unchecked }, TRAY_CMD_COLOR_AUTO, w!("自动反色"));
+            let _ = AppendMenuW(color_menu, if state.color_mode == settings::ColorMode::White { checked } else { unchecked }, TRAY_CMD_COLOR_WHITE, w!("常驻白色"));
+            let _ = AppendMenuW(color_menu, if state.color_mode == settings::ColorMode::Black { checked } else { unchecked }, TRAY_CMD_COLOR_BLACK, w!("常驻黑色"));
+            let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_POPUP.0), color_menu.0 as usize, w!("显示配色"));
+            // 「显示位置」子菜单：记忆 + 九宫格九格位（格位索引 = id - TRAY_CMD_POS_MEMORY）
+            let _ = AppendMenuW(pos_menu, if state.position_mode == 0 { checked } else { unchecked }, TRAY_CMD_POS_MEMORY, w!("记忆"));
+            let cells = [
+                (TRAY_CMD_POS_TL, w!("左上")), (TRAY_CMD_POS_TC, w!("上中")), (TRAY_CMD_POS_TR, w!("右上")),
+                (TRAY_CMD_POS_ML, w!("左中")), (TRAY_CMD_POS_MC, w!("居中")), (TRAY_CMD_POS_MR, w!("右中")),
+                (TRAY_CMD_POS_BL, w!("左下")), (TRAY_CMD_POS_BC, w!("下中")), (TRAY_CMD_POS_BR, w!("右下")),
+            ];
+            for (i, &(id, label)) in cells.iter().enumerate() {
+                let flag = if state.position_mode == i as u8 + 1 { checked } else { unchecked };
+                let _ = AppendMenuW(pos_menu, flag, id, label);
+            }
+            let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_POPUP.0), pos_menu.0 as usize, w!("显示位置"));
+            let _ = AppendMenuW(menu, if state.auto_start { checked } else { unchecked }, TRAY_CMD_AUTO_START, w!("开机自启动"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_ABOUT, w!("关于"));
             let _ = AppendMenuW(menu, MENU_ITEM_FLAGS(MF_STRING.0), TRAY_CMD_EXIT, w!("直接退出"));
             let mut pt = POINT::default();
@@ -155,6 +217,8 @@ impl Tray {
             let _ = DestroyMenu(submenu);
             let _ = DestroyMenu(style_menu);
             let _ = DestroyMenu(size_menu);
+            let _ = DestroyMenu(color_menu);
+            let _ = DestroyMenu(pos_menu);
         }
     }
 
@@ -262,9 +326,33 @@ mod tests {
             assert!(id - TRAY_CMD_SIZE_XS < crate::render::FONT_LEVELS.len(), "档位索引越界");
         }
         // 不得与既有命令 ID 重叠
-        let taken = [TRAY_CMD_SHOW, TRAY_CMD_EXIT, TRAY_CMD_ABOUT, TRAY_CMD_FORMAT_HM, TRAY_CMD_FORMAT_HMS, TRAY_CMD_STYLE_DEFAULT, TRAY_CMD_STYLE_SEG, TRAY_CMD_AUTO_START];
+        let taken = [TRAY_CMD_SHOW, TRAY_CMD_EXIT, TRAY_CMD_ABOUT, TRAY_CMD_FORMAT_HM, TRAY_CMD_FORMAT_HMS, TRAY_CMD_STYLE_DEFAULT, TRAY_CMD_STYLE_SEG, TRAY_CMD_AUTO_START, TRAY_CMD_COLOR_AUTO, TRAY_CMD_COLOR_WHITE, TRAY_CMD_COLOR_BLACK];
         for id in ids {
             assert!(!taken.contains(&id), "档位命令 ID 与既有命令冲突: {id}");
+        }
+    }
+
+    /// 位置命令 ID 连续且映射到合法位置模式（0..=9）——main.rs 按 `id - TRAY_CMD_POS_MEMORY`
+    /// 算模式后直接传给 Floater，故此处锁定连续性与不重叠
+    #[test]
+    fn position_cmd_ids_map_to_valid_modes() {
+        let ids = [
+            TRAY_CMD_POS_MEMORY, TRAY_CMD_POS_TL, TRAY_CMD_POS_TC, TRAY_CMD_POS_TR, TRAY_CMD_POS_ML,
+            TRAY_CMD_POS_MC, TRAY_CMD_POS_MR, TRAY_CMD_POS_BL, TRAY_CMD_POS_BC, TRAY_CMD_POS_BR,
+        ];
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(id - TRAY_CMD_POS_MEMORY, i, "位置命令 ID 必须连续");
+            assert!(id - TRAY_CMD_POS_MEMORY <= 9, "位置模式越界");
+        }
+        // 不得与既有命令 ID 重叠（含 size 五档与黑名单 1016）
+        let taken = [
+            TRAY_CMD_SHOW, TRAY_CMD_EXIT, TRAY_CMD_ABOUT, TRAY_CMD_FORMAT_HM, TRAY_CMD_FORMAT_HMS,
+            TRAY_CMD_STYLE_DEFAULT, TRAY_CMD_STYLE_SEG, TRAY_CMD_AUTO_START, TRAY_CMD_SIZE_XS,
+            TRAY_CMD_SIZE_S, TRAY_CMD_SIZE_M, TRAY_CMD_SIZE_L, TRAY_CMD_SIZE_XL, TRAY_CMD_COLOR_AUTO,
+            TRAY_CMD_COLOR_WHITE, TRAY_CMD_COLOR_BLACK, TRAY_CMD_BLACKLIST,
+        ];
+        for id in ids {
+            assert!(!taken.contains(&id), "位置命令 ID 与既有命令冲突: {id}");
         }
     }
 }
