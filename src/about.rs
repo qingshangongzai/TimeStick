@@ -35,7 +35,7 @@ use windows::Win32::Graphics::Gdi::{
     TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::SystemServices::{SS_ICON, SS_NOTIFY, SS_RIGHT};
+use windows::Win32::System::SystemServices::{SS_ICON, SS_NOTIFY};
 use windows::Win32::System::WindowsProgramming::MulDiv;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
@@ -77,8 +77,13 @@ const NAME_TEXT: &str = "时间贴";
 /// 顶部图标边长（逻辑像素）：与名称块（名称 + slogan）同高，由字号/间距常量推导，
 /// 调整 NAME_H / LINE_H / GAP 时自动跟随，避免图标与文字块高度错位
 const ICON_SIZE: i32 = NAME_H + GAP / 2 + LINE_H; // 24 + 4 + 20 = 48
-/// 链接行标签列位宽（右对齐，冒号右缘贴齐统一）：5 个全角字符 × 9pt em（12px）
-const LINK_LABEL_W: i32 = 64;
+/// 联系组标签文本（控件文本唯一来源）：去冒号、统一 4 字等长——
+/// 三行天然等宽，普通左对齐即两端齐平，无需自绘分散对齐
+const DEV_LABEL: &str = "开发人员";
+const URL_LABEL: &str = "项目地址";
+const MAIL_LABEL: &str = "电子邮箱";
+/// 联系组标签列兜底位宽（仅 DC 不可用时的降级值）：4 个全角字符 × 9pt em（12px）
+const LINK_LABEL_W: i32 = 48;
 
 /// 木兰官方应用指引第 1 步：补充软件名与版权人后的声明行
 const MULAN_NOTICE: &str = "Copyright (c) 2026 青山公仔 · TimeStick（时间贴）is licensed under Mulan PSL v2.";
@@ -275,13 +280,15 @@ unsafe fn setup(hwnd: HWND, owner: HWND, dpi: u32) {
         let ver_text = format!("版本 {}", env!("CARGO_PKG_VERSION"));
         st.ver_text = ver_text.clone();
         set_text(st.ver_st, &ver_text);
-        st.dev_label = create_child(hwnd, w!("Static"), w!("开发者："), WINDOW_STYLE(st_basic.0 | SS_RIGHT.0), None);
+        st.dev_label = create_child(hwnd, w!("Static"), PCWSTR::null(), st_basic, None);
+        set_text(st.dev_label, DEV_LABEL);
         st.dev_st = create_child(hwnd, w!("Static"), PCWSTR::null(), st_basic, None);
         set_text(st.dev_st, env!("CARGO_PKG_AUTHORS"));
         st.desc_st = create_child(hwnd, w!("Static"), PCWSTR::null(), st_basic, None);
         set_text(st.desc_st, env!("CARGO_PKG_DESCRIPTION"));
-        // 项目地址 / 邮箱：灰标签（右对齐贴齐）+ 蓝色下划线链接（SS_NOTIFY 点击上报 STN_CLICKED）
-        st.url_label = create_child(hwnd, w!("Static"), w!("项目地址："), WINDOW_STYLE(st_basic.0 | SS_RIGHT.0), None);
+        // 项目地址 / 电子邮箱：统一 4 字的灰标签（左对齐即两端齐平）+ 蓝色下划线链接（SS_NOTIFY 点击上报 STN_CLICKED）
+        st.url_label = create_child(hwnd, w!("Static"), PCWSTR::null(), st_basic, None);
+        set_text(st.url_label, URL_LABEL);
         st.url_st = create_child(
             hwnd,
             w!("Static"),
@@ -290,7 +297,8 @@ unsafe fn setup(hwnd: HWND, owner: HWND, dpi: u32) {
             Some(IDC_URL_LINK),
         );
         set_text(st.url_st, PROJECT_URL);
-        st.email_label = create_child(hwnd, w!("Static"), w!("邮箱："), WINDOW_STYLE(st_basic.0 | SS_RIGHT.0), None);
+        st.email_label = create_child(hwnd, w!("Static"), PCWSTR::null(), st_basic, None);
+        set_text(st.email_label, MAIL_LABEL);
         st.email_st = create_child(
             hwnd,
             w!("Static"),
@@ -699,8 +707,9 @@ fn layout(hwnd: HWND, st: &AboutState) {
         place(st.ver_st, text_x + name_w + gap, ver_y, ver_w, line);
         place(st.desc_st, text_x, y + name_h + gap / 2, name_row, line);
         y += head_h + gap;
-        // 联系组（开发者 / 项目地址 / 邮箱）：统一"标签右对齐 + 值两栏"版式，开发者为灰字
-        let link_label_w = LINK_LABEL_W * k / 96;
+        // 联系组（开发人员 / 项目地址 / 电子邮箱）：标签统一 4 字等长，左对齐即两端齐平 + 值两栏。
+        // 列宽按标签实测宽取（三行等长，取任一即可），DC 无效时用常量兜底
+        let link_label_w = text_width(hdc, st.font_body, URL_LABEL).unwrap_or(LINK_LABEL_W * k / 96);
         let link_x = m + link_label_w + gap;
         let link_max = w - link_label_w - gap;
         place(st.dev_label, m, y, link_label_w, line);
