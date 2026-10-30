@@ -1,6 +1,6 @@
 [package]
 name = "timestick"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 authors = ["青山公仔"]
 description = "全屏时间悬浮窗 —— 极轻量级 Windows 桌面常驻工具"
