@@ -20,8 +20,12 @@
 //!
 //! 窗口与 D2D 渲染器延迟到首次全屏显示时创建（ensure_created），隐藏时销毁（hide），
 //! 静默驻留期间不加载 D2D/DWrite、不持有窗口，常驻内存最小化。
+//!
+//! 置顶维护：`WS_EX_TOPMOST` 只决定“最顶组”归属，组内顺序会被后置顶的同组窗口改写
+//! （全屏播放器被激活或弹 OSD），故显示期间由 ID_TOP 定时器轮询并补顶。
 
 use std::mem::size_of;
+use std::ptr::addr_of_mut;
 
 use windows::core::{w, PCWSTR, Result};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -30,6 +34,7 @@ use windows::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Controls::{HOVER_DEFAULT, WM_MOUSELEAVE};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
@@ -44,6 +49,8 @@ use crate::settings;
 const ID_TIMER: usize = 1; // 时间刷新（每次触发后按距下次显示变化的毫秒数重排）
 const ID_HOVER: usize = 2; // 固定模式悬停检测（250ms）
 const ID_BG: usize = 3; // 背景亮度采样（与时间刷新解耦）
+const ID_TOP: usize = 4; // 置顶维护：被同组置顶窗口压住时补顶
+const TOP_TICK_MS: u32 = USER_TIMER_MINIMUM; // 置顶检查周期：SetTimer 下限 10ms（实际按系统计时粒度约 15.6ms 触发），压住后 1~2 帧内恢复
 const HOVER_TICK_MS: u32 = 250;
 const BG_TICK_MS: u32 = 250; // 采样周期：配色翻转延迟 ≤250ms
 const HOVER_UNPIN_MS: u32 = 1500; // 悬停超过 1.5s 自动解除固定
@@ -407,6 +414,7 @@ impl Floater {
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             SetTimer(Some(hwnd), ID_TIMER, 1000, None); // 每秒刷新时间
+            SetTimer(Some(hwnd), ID_TOP, TOP_TICK_MS, None); // 被同组置顶窗口压住时补顶
             if self.color_mode == settings::ColorMode::Auto {
                 SetTimer(Some(hwnd), ID_BG, BG_TICK_MS, None); // 背景采样与时间刷新解耦；固定色模式不读屏
             }
@@ -434,6 +442,8 @@ impl Floater {
             let _ = ReleaseCapture();
             let _ = KillTimer(Some(hwnd), ID_TIMER);
             let _ = KillTimer(Some(hwnd), ID_HOVER);
+            // 置顶维护随窗口一起停，重建后由 show() 重新挂上
+            let _ = KillTimer(Some(hwnd), ID_TOP);
             // 窗口销毁前必杀采样定时器，否则重建后采样永久失效
             let _ = KillTimer(Some(hwnd), ID_BG);
             let _ = DestroyWindow(hwnd);
@@ -687,6 +697,51 @@ impl Floater {
         }
     }
 
+    /// ID_TOP 定时器：`WS_EX_TOPMOST` 只保证处在最顶组，不保证组内顺序——同组窗口被激活
+    /// （点击播放器按钮）或弹出 OSD（空格 / 双击暂停）后会排到本窗口之上，须周期检查补顶。
+    /// 沿 z 序向上跳过隐藏窗口（隐藏窗口可能仍保留 z 序位），取第一个可见窗口；仅当它属于
+    /// 前台应用进程（且非本进程）才补顶——托盘菜单、系统通知等临时顶层窗口不该被时钟压住。
+    fn on_top_tick(&mut self) {
+        if !self.visible {
+            return;
+        }
+        let Some(hwnd) = self.hwnd else { return };
+        let mut cur = hwnd;
+        let above = loop {
+            let Ok(above) = (unsafe { GetWindow(cur, GW_HWNDPREV) }) else {
+                return; // 已到 z 序顶端：未被压住
+            };
+            if unsafe { IsWindowVisible(above).as_bool() } {
+                break above;
+            }
+            cur = above;
+        };
+        unsafe {
+            let fg = GetForegroundWindow();
+            if fg.is_invalid() {
+                return;
+            }
+            let mut fg_pid = 0u32;
+            let mut above_pid = 0u32;
+            GetWindowThreadProcessId(fg, Some(addr_of_mut!(fg_pid)));
+            GetWindowThreadProcessId(above, Some(addr_of_mut!(above_pid)));
+            if above_pid == 0 || above_pid != fg_pid || above_pid == GetCurrentProcessId() {
+                return;
+            }
+            // SWP_NOACTIVATE：补顶不抢全屏应用焦点；NOOWNERZORDER 保持同一顶层窗口语义
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            );
+        }
+        Log::log("floater re-raised: covered by foreground app");
+    }
+
     fn on_lbuttondown(&mut self, lparam: LPARAM) {
         if self.pinned || !self.visible {
             return;
@@ -828,6 +883,8 @@ unsafe extern "system" fn floater_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, 
                     floater.on_hover_tick();
                 } else if wparam.0 == ID_BG {
                     floater.on_bg_tick();
+                } else if wparam.0 == ID_TOP {
+                    floater.on_top_tick();
                 } else if let Some(hwnd) = floater.hwnd {
                     floater.render_now(hwnd);
                     // 按距下一次显示变化的毫秒数重排定时器（wMilliseconds/wSecond 实时读取），
